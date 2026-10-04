@@ -1,0 +1,16 @@
+# dsh-subagent-mgm bundle patch: inserts the plugin row into the profile roster.
+# The host half (exports ".") serves the Settings page route
+# /api/subagent-mgm/settings and stores the four switches in
+# <DSH_PROFILE_DIR|DSH_HOME|~/.dsh>/subagent-mgm.json; the `config` block below
+# is the per-field fallback used until that page writes the file.
+# The browser half (exports "./client", declared in package.json dsh.client)
+# replaces the conversation-header subagent catalog with a newest-first tree
+# and keeps one right-sidebar panel per running subagent.
+- insert:
+    - id: dsh-subagent-mgm
+      name: 'dsh-subagent-mgm'
+      config:
+        newestFirst: true
+        autoOpen: true
+        autoClose: true
+        reveal: true

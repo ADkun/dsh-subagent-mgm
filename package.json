@@ -1,0 +1,47 @@
+{
+  "name": "dsh-subagent-mgm",
+  "version": "1.0.0",
+  "private": true,
+  "description": "子智能体管理：会话顶部的子智能体目录按创建时间倒序显示；子智能体运行时自动在右侧栏打开它的会话，结束时自动关闭（用户提前关闭会被尊重）。Subagent management for the DeepSeek Harness Web UI — newest-first subagent catalog and automatic right-sidebar panels.",
+  "type": "module",
+  "scripts": {
+    "test": "node verify.mjs"
+  },
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "subagent"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-resources",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-client-ui-workspace"
+      ]
+    }
+  }
+}
