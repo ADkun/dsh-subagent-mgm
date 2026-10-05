@@ -1,16 +1,28 @@
 /**
  * Browser half of dsh-subagent-mgm.
  *
- * Two behaviours for the DSH Web UI:
+ * The DSH Web UI side of dsh-subagent-mgm:
  *  1. The subagent catalog trigger in the conversation header lists subagents
  *     newest-first (by `createdAt`), at every nesting level.
  *  2. A running direct subagent of the on-screen session gets its chat panel in
  *     the right sidebar automatically, and that panel closes when the subagent
  *     ends. Closing it by hand while the subagent still runs is respected.
+ *  3. Every row carries a capability face: the tools its last request carried,
+ *     the skills its preset sees and the persona its delegation wrote, read from
+ *     the host at `/api/subagent-mgm/face` — another session's log is in nothing
+ *     the browser receives.
+ *  4. The menu can narrow its tree (text / state / mode) and total what it has
+ *     loaded — tokens, the cache-hit share of prompt-side input, and wall time —
+ *     in two lines so neither reflows the other. The session on screen is totalled
+ *     with them and named beside the totals, since its own tokens are spent in the
+ *     same place. The model behind those rows is
+ *     read on demand from `/api/subagent-mgm/models`, because a model is named
+ *     only in that subagent's own log. The share is taken over summed buckets,
+ *     never averaged per row, so a tree total means what one log's share means.
  *
- * A Settings page in the settings.section slot switches all of it on and off.
- * The switches are stored by this bundle's host half behind
- * /api/subagent-mgm/settings, so they survive a reload.
+ * A Settings page in the settings.section slot switches the ordering and the
+ * automatic panels on and off. The switches are stored by this bundle's host half
+ * behind /api/subagent-mgm/settings, so they survive a reload.
  *
  * The count trigger, the breadcrumb switcher and the tree are ported from the shipped
  * `@deepseek-ai/dsh-client-ui-subagent` catalog (markup, CSS and behaviour),
@@ -34,10 +46,16 @@ window.__ModuleLoader__.load({
 		const STYLE_TAG = "dsh-subagent-mgm/SubagentMgr.module.css";
 		const MENU_VIEWPORT_MARGIN = 16;
 		const MENU_WIDTH = 336;
+		/** The capability face needs room for a tool list, so its menu is wider. */
+		const MENU_WIDTH_WIDE = 520;
 		const HOVER_OPEN_DELAY = 150;
 		const HOVER_CLOSE_DELAY = 120;
 		/** Same-origin route backed by this bundle's host half. */
 		const SETTINGS_ROUTE = "/api/subagent-mgm/settings";
+		/** Same-origin route that returns one subagent's capability face. */
+		const FACE_ROUTE = "/api/subagent-mgm/face";
+		/** Same-origin route that returns the model behind a batch of session ids. */
+		const MODELS_ROUTE = "/api/subagent-mgm/models";
 		/** Every switch the settings page owns, in page order. */
 		const SETTING_FIELDS = ["newestFirst", "autoOpen", "autoClose", "reveal"];
 		/** Effective switches before the first host reply: the original behaviour. */
@@ -94,7 +112,6 @@ window.__ModuleLoader__.load({
 .smgm-menu{z-index:100;box-sizing:border-box;border-radius:var(--dsw-radius-lg,12px);--dsh-scrollbar-thumb:var(--dsw-alias-scrollbar-bg-l2);--dsh-scrollbar-thumb-hover:var(--dsw-alias-scrollbar-hover-l2);--dsw-elevation-stroke-color:var(--dsw-alias-border-l1);width:336px;max-width:min(400px,100vw - 32px);max-height:min(560px,100vh - 140px);box-shadow:var(--dsw-elevation-prominent,0 10px 32px rgba(0,0,0,.18));flex-direction:column;padding:3px;display:flex;position:fixed;overflow:hidden}
 .smgm-menu:before{content:"";z-index:-1;border-radius:inherit;background:var(--dsw-specific-menu,var(--dsw-alias-bg-overlay));backdrop-filter:var(--dsw-menu-backdrop-filter);position:absolute;inset:0}
 .smgm-menuBody{flex-direction:column;flex:auto;min-height:0;display:flex;overflow:auto}
-.smgm-menuBody>.smgm-node{margin-left:-2px}
 .smgm-node{min-width:0;position:relative}
 .smgm-row{box-sizing:border-box;border-radius:var(--dsw-radius-lg,12px);width:100%;min-height:44px;color:var(--dsw-alias-label-primary);text-align:left;cursor:pointer;background:0 0;border:0;outline:none;align-items:flex-start;gap:6px;padding:6px 7px 6px 9px;font-size:12px;line-height:17px;display:flex;position:relative}
 .smgm-row:hover>.smgm-clickarea,.smgm-row:focus-visible>.smgm-clickarea{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}
@@ -167,6 +184,54 @@ window.__ModuleLoader__.load({
 .smgm-setMono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;word-break:break-all;padding:8px 10px;border-radius:9px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1,var(--dsw-alias-bg-overlay))}
 .smgm-setOk{color:var(--dsw-alias-state-success-primary)}
 .smgm-setErr{color:var(--dsw-alias-state-error-primary)}
+.smgm-faceButton{border-radius:var(--dsw-radius-sm);width:28px;height:28px;color:var(--dsw-alias-label-tertiary);cursor:pointer;background:0 0;border:0;flex:none;justify-content:center;align-items:center;margin:4px 0;padding:6px;display:inline-flex}
+.smgm-faceButton:hover,.smgm-faceButton:focus-visible{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12));color:var(--dsw-alias-label-primary)}
+.smgm-menu.smgm-menuWide{width:520px;max-width:min(620px,100vw - 32px)}
+.smgm-face{flex-direction:column;gap:12px;padding:9px 11px 13px;display:flex}
+.smgm-faceHead{align-items:center;gap:8px;display:flex}
+.smgm-faceBack{border-radius:var(--dsw-radius-sm);color:var(--dsw-alias-label-secondary,var(--dsw-alias-label-primary));cursor:pointer;background:0 0;border:0;flex:none;align-items:center;gap:2px;padding:4px 6px;font:inherit;font-size:11.5px;display:inline-flex}
+.smgm-faceBack:hover,.smgm-faceBack:focus-visible{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12));color:var(--dsw-alias-label-primary)}
+.smgm-faceTitle{text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;font-size:13px;font-weight:600;overflow:hidden}
+.smgm-faceChip{border-radius:999px;border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-tertiary);flex:none;padding:1px 8px;font-size:10.5px;line-height:15px}
+.smgm-faceGrid{grid-template-columns:auto 1fr;gap:3px 12px;font-size:11.5px;line-height:16px;display:grid}
+.smgm-faceKey{color:var(--dsw-alias-label-tertiary);white-space:nowrap}
+.smgm-faceValue{color:var(--dsw-alias-label-primary);word-break:break-word}
+.smgm-faceSection{flex-direction:column;gap:6px;display:flex}
+.smgm-faceSectionHead{align-items:baseline;gap:6px;display:flex}
+.smgm-faceSectionTitle{font-size:11.5px;font-weight:600;color:var(--dsw-alias-label-secondary,var(--dsw-alias-label-primary))}
+.smgm-faceCount{color:var(--dsw-alias-label-tertiary);font-size:10.5px;font-variant-numeric:tabular-nums}
+.smgm-faceItem{border-radius:var(--dsw-radius-sm);border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1,var(--dsw-alias-bg-overlay));flex-direction:column;gap:2px;padding:6px 8px;display:flex}
+.smgm-faceItemName{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;color:var(--dsw-alias-label-primary);word-break:break-all}
+.smgm-faceItemDesc{font-size:11px;line-height:15px;color:var(--dsw-alias-label-tertiary)}
+.smgm-faceItemFlag{font-size:10px;color:var(--dsw-alias-label-tertiary);cursor:pointer}
+.smgm-faceParams{margin:4px 0 0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;line-height:15px;color:var(--dsw-alias-label-secondary,var(--dsw-alias-label-primary));white-space:pre-wrap;word-break:break-word;max-height:160px;overflow:auto}
+.smgm-facePre{margin:0;padding:8px 10px;border-radius:9px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1,var(--dsw-alias-bg-overlay));font-size:11.5px;line-height:17px;white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto}
+.smgm-faceNote{font-size:10.5px;line-height:15px;color:var(--dsw-alias-label-tertiary)}
+.smgm-faceEmpty{padding:4px 0;font-size:11px;color:var(--dsw-alias-label-tertiary)}
+.smgm-faceError{padding:8px 10px;border-radius:9px;border:1px solid var(--dsw-alias-state-error-primary);color:var(--dsw-alias-state-error-primary);font-size:11.5px;line-height:16px;word-break:break-word}
+.smgm-faceLoading{padding:16px 10px;font-size:12px;color:var(--dsw-alias-label-tertiary);text-align:center}
+.smgm-faceFilter{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-word}
+.smgm-head{flex-direction:column;gap:6px;padding:4px 6px 7px;border-bottom:.5px solid var(--dsw-alias-border-l1);display:flex;position:sticky;top:0;z-index:1;background:var(--dsw-specific-menu,var(--dsw-alias-bg-overlay))}
+.smgm-controls{flex-direction:column;gap:6px;display:flex}
+.smgm-search{box-sizing:border-box;width:100%;border-radius:var(--dsw-radius-sm);border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1,var(--dsw-alias-bg-overlay));color:var(--dsw-alias-label-primary);font:inherit;font-size:11.5px;line-height:16px;padding:4px 7px;outline:none}
+.smgm-search:focus-visible{border-color:var(--dsw-alias-brand-primary)}
+.smgm-search::placeholder{color:var(--dsw-alias-label-tertiary)}
+.smgm-chips{align-items:center;gap:4px;flex-wrap:wrap;display:flex}
+.smgm-chip{border-radius:999px;border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-tertiary);cursor:pointer;background:0 0;font:inherit;font-size:10.5px;line-height:15px;white-space:nowrap;padding:1px 8px}
+.smgm-chip:hover,.smgm-chip:focus-visible{color:var(--dsw-alias-label-primary)}
+.smgm-chipOn{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary)}
+.smgm-chipClear{margin-left:auto;border:0;padding:1px 4px}
+.smgm-totals{align-items:center;gap:6px;flex-wrap:wrap;font-size:10.5px;line-height:15px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums;display:flex}
+.smgm-totalsItem{white-space:nowrap}
+.smgm-summaryHint{font-size:10px;line-height:15px;color:var(--dsw-alias-label-tertiary)}
+.smgm-modelHead{align-items:center;gap:6px;flex-wrap:wrap;display:flex}
+.smgm-models{flex-direction:column;gap:2px;display:flex}
+.smgm-modelRow{align-items:baseline;gap:6px;font-size:10.5px;line-height:15px;color:var(--dsw-alias-label-secondary,var(--dsw-alias-label-primary));display:flex;flex-wrap:wrap}
+.smgm-modelName{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;min-width:0;word-break:break-all}
+.smgm-modelRow>.smgm-totalsItem{margin-left:auto}
+.smgm-modelError{font-size:10.5px;line-height:15px;color:var(--dsw-alias-state-error-primary)}
+.smgm-filterEmpty{padding:12px 10px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary);text-align:center}
+.smgm-tree>.smgm-node{margin-left:-2px}
 `;
 
 		/** Simplified Chinese dictionary (key-set source of truth). */
@@ -236,7 +301,77 @@ window.__ModuleLoader__.load({
 			"settings.failed": "无法读取设置：连不上插件后端",
 			"settings.rejected": "服务器拒绝了这次保存",
 			"settings.retry": "重试",
-			"settings.note": "这些开关只影响本插件的界面行为，保存后立即生效，不需要重启。"
+			"settings.note": "这些开关只影响本插件的界面行为，保存后立即生效，不需要重启。",
+			"face.open": "查看能力",
+			"face.open.aria": "查看 {label} 的工具、技能与人格",
+			"face.title": "子智能体能力",
+			"face.back": "返回",
+			"face.close": "关闭",
+			"face.loading": "正在读取该子智能体的日志…",
+			"face.failed": "无法读取该子智能体的能力",
+			"face.section.profile": "身份与运行配置",
+			"face.section.tools": "可用工具",
+			"face.section.skills": "技能",
+			"face.section.persona": "人格",
+			"face.mode": "模式",
+			"face.state": "状态",
+			"face.launch": "启动方式",
+			"face.preset": "预设",
+			"face.model": "模型",
+			"face.delegatedModel": "委派指定的模型",
+			"face.cwd": "工作目录",
+			"face.depth": "委派深度",
+			"face.created": "创建时间",
+			"face.parent": "父会话",
+			"face.filter": "工具过滤",
+			"face.filter.allow": "允许",
+			"face.filter.deny": "排除",
+			"face.tools.count": "{count} 个",
+			"face.tools.source": "取自它最后一次请求的工具集合。",
+			"face.tools.empty": "该子智能体的日志里没有工具快照。",
+			"face.tools.params": "参数",
+			"face.tools.deferred": "延迟加载",
+			"face.skills.count": "{count} 个",
+			"face.skills.empty": "该会话的预设与工作目录下没有可见技能。",
+			"face.skills.unavailable": "宿主没有挂载技能注册表，无法列出技能。",
+			"face.skills.failed": "技能列表读取失败：{error}",
+			"face.skills.agentOnly": "仅智能体可调用",
+			"face.persona.recorded": "委派记录（权威）",
+			"face.persona.inferred": "由系统提示差异推断",
+			"face.persona.generated": "按运行模型生成",
+			"face.persona.generatedNote": "本次委派没有指派人格，这一行是宿主按该子智能体所用模型填进人格槽位的。",
+			"face.persona.replaced": "被它替换掉的父会话人格",
+			"face.persona.empty": "日志里没有记录人格：它很可能沿用父会话的组成，或者本次委派没有指派人格。",
+			"controls.placeholder": "筛选子智能体",
+			"controls.searchAria": "按名称、标题或工作目录筛选子智能体",
+			"controls.clear": "清除筛选",
+			"filter.all": "全部",
+			"filter.inactive": "已结束",
+			"filter.oneShot": "仅一次性",
+			"filter.empty": "没有符合筛选条件的子智能体。",
+			"totals.loaded": "已加载 {count} 个",
+			"totals.running": "运行中 {count} 个",
+			"totals.tokens": "合计 {value}",
+			"totals.duration": "合计 {duration}",
+			"totals.none": "没有可统计的子智能体。",
+			"totals.partial": "{count} 个没有用量数据",
+			"totals.tokensWithSelf": "合计 {value}（本会话 {self}）",
+			"totals.selfTitle": "这一屏会话自己用掉的部分，已算进这个合计：命中 {hit} · 写入 {written} · 提示合计 {prompt}（未命中 {missed}）",
+			"cache.percent": "缓存命中 {percent}%",
+			"cache.exactTitle": "命中 {hit} · 提示合计 {prompt}（未命中 {missed}）",
+			"cache.stripTitle": "命中 {hit} · 写入 {written} · 提示合计 {prompt}（未命中 {missed}）",
+			"tokens.exactTitle": "合计 {value} tok",
+			"tokens.cacheTitle": "合计 {value} tok · 缓存命中 {percent}%",
+			"models.fetch": "按模型汇总",
+			"models.refetch": "重新汇总",
+			"models.hint": "模型只存在于会话日志里，点一下才去读。",
+			"models.loading": "正在读取日志…",
+			"models.failed": "无法读取模型",
+			"models.empty": "没有读到模型信息。",
+			"models.unknown": "未知模型",
+			"models.unknownNote": "日志里没有模型信息，或该会话的日志没能读到。",
+			"models.delegated": "委派指定的模型",
+			"models.times": "× {count}"
 		};
 		/** English dictionary, key-identical to the Chinese source of truth. */
 		const en = {
@@ -305,7 +440,77 @@ window.__ModuleLoader__.load({
 			"settings.failed": "Could not read the settings: the plugin backend is unreachable",
 			"settings.rejected": "The server rejected this save",
 			"settings.retry": "Retry",
-			"settings.note": "These switches only steer this plugin's UI; a save takes effect at once and needs no restart."
+			"settings.note": "These switches only steer this plugin's UI; a save takes effect at once and needs no restart.",
+			"face.open": "View capabilities",
+			"face.open.aria": "View the tools, skills and persona of {label}",
+			"face.title": "Subagent capabilities",
+			"face.back": "Back",
+			"face.close": "Close",
+			"face.loading": "Reading this subagent's log…",
+			"face.failed": "Could not read this subagent's capabilities",
+			"face.section.profile": "Identity and run",
+			"face.section.tools": "Tools",
+			"face.section.skills": "Skills",
+			"face.section.persona": "Persona",
+			"face.mode": "Mode",
+			"face.state": "State",
+			"face.launch": "Spawned by",
+			"face.preset": "Preset",
+			"face.model": "Model",
+			"face.delegatedModel": "Delegated model",
+			"face.cwd": "Working directory",
+			"face.depth": "Delegation depth",
+			"face.created": "Created",
+			"face.parent": "Parent session",
+			"face.filter": "Tool filter",
+			"face.filter.allow": "allow",
+			"face.filter.deny": "deny",
+			"face.tools.count": "{count} tools",
+			"face.tools.source": "Taken from the tool set of its last request.",
+			"face.tools.empty": "This subagent's log holds no tool snapshot.",
+			"face.tools.params": "parameters",
+			"face.tools.deferred": "deferred",
+			"face.skills.count": "{count} skills",
+			"face.skills.empty": "No skill is visible under this session's preset and working directory.",
+			"face.skills.unavailable": "The host has no skill registry mounted, so skills cannot be listed.",
+			"face.skills.failed": "Could not list skills: {error}",
+			"face.skills.agentOnly": "agent-only",
+			"face.persona.recorded": "Delegation record (authoritative)",
+			"face.persona.inferred": "Inferred from the system-prompt difference",
+			"face.persona.generated": "Filled in from the run model",
+			"face.persona.generatedNote": "This delegation named no persona; that line is the one the host wrote into the persona slot from the model this subagent ran on.",
+			"face.persona.replaced": "The parent persona it replaced",
+			"face.persona.empty": "No persona in the log: this subagent most likely inherits its parent's composition, or the delegation assigned none.",
+			"controls.placeholder": "Filter subagents",
+			"controls.searchAria": "Filter subagents by name, title, or working directory",
+			"controls.clear": "Clear filter",
+			"filter.all": "All",
+			"filter.inactive": "Finished",
+			"filter.oneShot": "One-shot only",
+			"filter.empty": "No subagent matches the filter.",
+			"totals.loaded": "{count} loaded",
+			"totals.running": "{count} running",
+			"totals.tokens": "{value} total",
+			"totals.duration": "{duration} total",
+			"totals.none": "Nothing to total yet.",
+			"totals.partial": "{count} without usage data",
+			"totals.tokensWithSelf": "{value} total ({self} here)",
+			"totals.selfTitle": "What this on-screen session spent itself, already counted in this total: hit {hit} · written {written} · prompt {prompt} (missed {missed})",
+			"cache.percent": "Cache hit {percent}%",
+			"cache.exactTitle": "Hit {hit} · prompt {prompt} (missed {missed})",
+			"cache.stripTitle": "Hit {hit} · written {written} · prompt {prompt} (missed {missed})",
+			"tokens.exactTitle": "{value} tok total",
+			"tokens.cacheTitle": "{value} tok total · cache hit {percent}%",
+			"models.fetch": "Total by model",
+			"models.refetch": "Total again",
+			"models.hint": "A model lives only in the session logs, so this reads them on demand.",
+			"models.loading": "Reading logs…",
+			"models.failed": "Could not read the models",
+			"models.empty": "No model was reported.",
+			"models.unknown": "Unknown model",
+			"models.unknownNote": "The log holds no model, or that session's log could not be read.",
+			"models.delegated": "Model named by the delegation",
+			"models.times": "× {count}"
 		};
 
 		//#region shared helpers
@@ -344,6 +549,48 @@ window.__ModuleLoader__.load({
 		 */
 		function tokenTotal(usage) {
 			return usage === undefined ? undefined : usage.uncachedInputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
+		}
+		/**
+		 * Sum the three disjoint prompt-side billing buckets: input the provider
+		 * billed fresh, input served from cache, and input written to the cache.
+		 * Cache reads are the cheap ones, so this is the denominator a cache-hit
+		 * share is measured against; output tokens are never prompt-side input.
+		 * @param usage - the session's token usage projection, if any.
+		 * @returns billed prompt tokens, or undefined without usage.
+		 */
+		function billedInputTokens(usage) {
+			if (usage === undefined || usage === null) return undefined;
+			const buckets = [usage.uncachedInputTokens, usage.cacheReadTokens, usage.cacheWriteTokens];
+			return buckets.reduce((sum, value) => sum + (typeof value === "number" && Number.isFinite(value) ? value : 0), 0);
+		}
+		/**
+		 * Display-ready cache-hit share of prompt-side input. A partial hit never
+		 * reads as a full one: when integer rounding would reach 100, the answer
+		 * keeps just enough decimals to stay below it, and a complete hit is
+		 * exactly 100. Nothing billed at all has no share to show.
+		 * @param cacheReadTokens - prompt tokens served from cache.
+		 * @param promptTokens - billed prompt tokens.
+		 * @returns percent text, or null when nothing was billed.
+		 */
+		function cacheHitPercent(cacheReadTokens, promptTokens) {
+			if (typeof promptTokens !== "number" || !Number.isFinite(promptTokens) || promptTokens <= 0) return null;
+			const read = typeof cacheReadTokens === "number" && Number.isFinite(cacheReadTokens) ? cacheReadTokens : 0;
+			if (read >= promptTokens) return "100";
+			for (let places = 0; places <= 3; places += 1) {
+				const factor = 10 ** places;
+				const percent = Math.round(read * 100 * factor / promptTokens) / factor;
+				if (percent < 100) return percent.toFixed(places);
+			}
+			return "99.9";
+		}
+		/**
+		 * Group an exact token count for a tooltip, where the compact form is too
+		 * coarse to check a number against a log.
+		 * @param value - an exact token count.
+		 * @returns the count with grouped thousands.
+		 */
+		function formatExactTokens(value) {
+			return typeof value === "number" && Number.isFinite(value) ? value.toLocaleString("en-US") : String(value ?? 0);
 		}
 		/**
 		 * Exact whole-second active-turn duration for one catalog row.
@@ -460,6 +707,181 @@ window.__ModuleLoader__.load({
 			const status = statuses === undefined ? undefined : statuses.get(childSessionId);
 			const running = status?.running ?? summaries[childSessionId]?.running;
 			return running === true ? "running" : "inactive";
+		}
+		/**
+		 * Whether any control is narrowing the tree.
+		 * @param filter - the current filter draft.
+		 * @returns whether a filter is in force.
+		 */
+		function filterActive(filter) {
+			return filter.text !== "" || filter.activity !== "all" || filter.oneShot === true;
+		}
+		/**
+		 * Whether one row passes the active filter on its own fields.
+		 * @param entry - one catalog entry.
+		 * @param filter - the active filter.
+		 * @param summaries - the list store's session summaries.
+		 * @param statuses - the unified session status snapshot.
+		 * @returns whether the row itself matches.
+		 */
+		function entryMatches(entry, filter, summaries, statuses) {
+			if (filter.activity !== "all") {
+				const running = activityOf(entry.id, summaries, statuses) === "running";
+				if (running !== (filter.activity === "running")) return false;
+			}
+			if (filter.oneShot === true && entry.mode !== "one-shot") return false;
+			if (filter.text === "") return true;
+			const needle = filter.text.toLowerCase();
+			const summary = summaries[entry.id];
+			return [entry.label ?? "", entry.id, summary?.title ?? "", summary?.cwd ?? ""]
+				.some((value) => value.toLowerCase().includes(needle));
+		}
+		/**
+		 * Whether one row, or any already loaded descendant of it, matches. Only
+		 * loaded branches are walked: a branch that was never fetched cannot be
+		 * searched, and claiming otherwise would hide rows silently.
+		 * @param entry - one catalog entry.
+		 * @param filter - the active filter.
+		 * @param projections - the list store's projection snapshots.
+		 * @param summaries - the list store's session summaries.
+		 * @param statuses - the unified session status snapshot.
+		 * @param seen - ids already walked, shared across one filter pass.
+		 * @returns whether the row survives the filter.
+		 */
+		function subtreeMatches(entry, filter, projections, summaries, statuses, seen) {
+			if (entryMatches(entry, filter, summaries, statuses)) return true;
+			const visited = seen ?? new Set();
+			if (visited.has(entry.id)) return false;
+			visited.add(entry.id);
+			const child = catalogOf(entry.id, projections, summaries);
+			if (child === undefined) return false;
+			for (const nested of child.entries ?? []) {
+				if (nested === null || typeof nested !== "object" || typeof nested.id !== "string") continue;
+				if (subtreeMatches(nested, filter, projections, summaries, statuses, visited)) return true;
+			}
+			return false;
+		}
+		/**
+		 * Total every loaded row under one catalog view, filter applied. Collapsing
+		 * a branch hides it without unloading it, so the totals do not move when a
+		 * branch is opened or closed. Rows whose projections have not arrived are
+		 * counted as unknown rather than as zero.
+		 * @param catalog - the catalog view to walk.
+		 * @param filter - the active filter, or undefined when nothing is filtered.
+		 * @param projections - the list store's projection snapshots.
+		 * @param summaries - the list store's session summaries.
+		 * @param statuses - the unified session status snapshot.
+		 * @param now - sampled wall clock for running children.
+		 * @param selfId - the session this tree hangs off, counted too, or undefined.
+		 * @returns the totals, one node entry per counted row, and `self` when the
+		 *   session itself was counted (it is not a row of this tree).
+		 */
+		function catalogTotals(catalog, filter, projections, summaries, statuses, now, selfId) {
+			const totals = {
+				count: 0, running: 0, tokens: 0, durationMs: 0, unknownTokens: 0, unknownDuration: 0,
+				cacheRead: 0, cacheWrite: 0, billedInput: 0, nodes: [], self: null
+			};
+			const seen = new Set();
+			/**
+			 * Fold one session's usage into the totals. The rows of the tree and the
+			 * session the tree hangs off run through the same arithmetic, so their
+			 * numbers cannot drift apart; only the row count treats them differently.
+			 * @param id - the session whose usage is counted.
+			 * @param activity - "running" or "inactive".
+			 * @param asRow - whether this session is a row of the tree.
+			 * @returns the node the model grouping reads.
+			 */
+			const account = (id, activity, asRow) => {
+				const summary = summaries[id];
+				const usageValue = summary?.projectionValues?.tokenUsage;
+				const tokens = tokenTotal(usageValue);
+				const billed = billedInputTokens(usageValue);
+				const cacheRead = typeof usageValue?.cacheReadTokens === "number" ? usageValue.cacheReadTokens : 0;
+				const cacheWrite = typeof usageValue?.cacheWriteTokens === "number" ? usageValue.cacheWriteTokens : 0;
+				const durationMs = activityDuration(summary, activity, now);
+				if (asRow) {
+					totals.count += 1;
+					if (activity === "running") totals.running += 1;
+				}
+				if (tokens === undefined) totals.unknownTokens += 1;
+				else totals.tokens += tokens;
+				if (billed !== undefined) totals.billedInput += billed;
+				totals.cacheRead += cacheRead;
+				totals.cacheWrite += cacheWrite;
+				if (durationMs === undefined) totals.unknownDuration += 1;
+				else totals.durationMs += Math.max(0, durationMs);
+				return {
+					id, tokens: tokens ?? 0, running: activity === "running",
+					cacheRead, cacheWrite, billedInput: billed ?? 0
+				};
+			};
+			// The session the tree hangs off is not one of its own rows — you are
+			// looking at it — but it spends its tokens in the same place, so it is
+			// counted first, under the same filter rule as the rows: it has no mode,
+			// so the one-shot chip leaves it out, and it never joins `count`.
+			if (selfId !== undefined && summaries[selfId] !== undefined
+				&& (filter === undefined || entryMatches({ id: selfId }, filter, summaries, statuses))) {
+				seen.add(selfId);
+				totals.self = account(selfId, activityOf(selfId, summaries, statuses), false);
+				totals.nodes.push(totals.self);
+			}
+			const walk = (view) => {
+				for (const entry of view?.entries ?? []) {
+					if (entry === null || typeof entry !== "object" || typeof entry.id !== "string") continue;
+					if (seen.has(entry.id)) continue;
+					seen.add(entry.id);
+					if (filter !== undefined && !subtreeMatches(entry, filter, projections, summaries, statuses)) continue;
+					totals.nodes.push(account(entry.id, activityOf(entry.id, summaries, statuses), true));
+					walk(catalogOf(entry.id, projections, summaries));
+				}
+			};
+			walk(catalog);
+			return totals;
+		}
+		/**
+		 * Name the model one batch answer reports: what the run actually used,
+		 * else what the delegation asked for, else nothing.
+		 * @param answer - one entry of the model batch, if it covered this id.
+		 * @returns the model identity, or null when nothing names one.
+		 */
+		function modelOf(answer) {
+			if (answer === undefined || answer.state !== "ok") return null;
+			if (answer.model !== null && answer.model !== undefined) {
+				return { key: `${answer.provider ?? ""}/${answer.model}`, name: answer.model, provider: answer.provider ?? null, delegated: false };
+			}
+			if (answer.agentModel !== null && answer.agentModel !== undefined) {
+				return { key: `${answer.agentProvider ?? ""}/${answer.agentModel}`, name: answer.agentModel, provider: answer.agentProvider ?? null, delegated: true };
+			}
+			return null;
+		}
+		/**
+		 * Group counted rows by the model behind them, largest first. Ids the batch
+		 * never answered for are reported separately, so the total can admit that
+		 * it is incomplete instead of inventing a model.
+		 * @param nodes - one entry per counted row, with its summed tokens.
+		 * @param models - session id → model batch answer.
+		 * @returns the groups, plus how many rows the batch did not answer for.
+		 */
+		function groupModels(nodes, models) {
+			const groups = new Map();
+			let unanswered = 0;
+			for (const node of nodes) {
+				if (!models.has(node.id)) unanswered += 1;
+				const model = modelOf(models.get(node.id));
+				const key = model === null ? null : model.key;
+				const group = groups.get(key) ?? { model, count: 0, tokens: 0, running: 0, cacheRead: 0, billedInput: 0 };
+				group.count += 1;
+				group.tokens += node.tokens;
+				if (node.running) group.running += 1;
+				group.cacheRead += typeof node.cacheRead === "number" ? node.cacheRead : 0;
+				group.billedInput += typeof node.billedInput === "number" ? node.billedInput : 0;
+				groups.set(key, group);
+			}
+			const ordered = [...groups.values()].sort((left, right) =>
+				right.tokens - left.tokens
+				|| right.count - left.count
+				|| (left.model?.name ?? "").localeCompare(right.model?.name ?? ""));
+			return { groups: ordered, unanswered };
 		}
 		/**
 		 * Order catalog entries newest-first, breaking ties by the newest event.
@@ -627,11 +1049,16 @@ window.__ModuleLoader__.load({
 		 * @param props.t - translate function.
 		 * @returns the rendered rows.
 		 */
-		function CatalogRows({ parentSessionId, currentSessionId, catalog, projections, summaries, statuses, expanded, level, openChild, openChildAside, refreshProjection, toggleBranch, closeCatalog, t }) {
+		function CatalogRows({ parentSessionId, currentSessionId, catalog, projections, summaries, statuses, expanded, level, openChild, openChildAside, refreshProjection, toggleBranch, closeCatalog, inspectFace, filter, t }) {
 			const [now, setNow] = useState(() => Date.now());
 			const settings = useSettings();
 			const entries = catalog?.entries ?? [];
-			const rows = settings.newestFirst ? sortNewestFirst(entries) : entries;
+			const filtering = filter !== undefined;
+			const ordered = settings.newestFirst ? sortNewestFirst(entries) : entries;
+			const rows = filtering
+				? ordered.filter((entry) => entry !== null && typeof entry === "object" && typeof entry.id === "string"
+					&& subtreeMatches(entry, filter, projections, summaries, statuses))
+				: ordered;
 			const anyRunning = rows.some((entry) => activityOf(entry.id, summaries, statuses) === "running");
 			useEffect(() => {
 				if (!anyRunning) return undefined;
@@ -648,6 +1075,7 @@ window.__ModuleLoader__.load({
 					onClick: () => refreshProjection(parentSessionId)
 				}, t("retry")));
 			if (catalog.state === "loading" && rows.length === 0) return h(CatalogLoadingRows, { t });
+			if (filtering && rows.length === 0) return level === 1 ? h("div", { className: "smgm-filterEmpty" }, t("filter.empty")) : null;
 
 			return h(React.Fragment, null, rows.map((entry) => {
 				if (entry === null || typeof entry !== "object" || typeof entry.id !== "string") return null;
@@ -661,15 +1089,17 @@ window.__ModuleLoader__.load({
 				const mode = entry.mode === "unknown" ? t("mode.unknown") : entry.mode === "one-shot" ? t("mode.oneShot") : t("mode.continuable");
 				const activityLabel = activity === "running" ? t("activity.running") : completed ? t("activity.completed") : t("activity.inactive");
 				const secondary = [summary?.title, mode, activityLabel].filter((value) => value !== undefined).join(" · ");
-				const totalTokens = tokenTotal(summary?.projectionValues?.tokenUsage);
+				const usageValue = summary?.projectionValues?.tokenUsage;
+				const totalTokens = tokenTotal(usageValue);
 				const tokenMetric = totalTokens === undefined ? undefined : t("tokens.total", { value: formatTokens(totalTokens, t) });
+				const rowCacheHit = cacheHitPercent(usageValue?.cacheReadTokens, billedInputTokens(usageValue));
 				const durationMs = activityDuration(summary, activity, now);
 				const durationMetric = durationMs === undefined ? undefined : {
 					compact: formatDuration(durationMs, t),
 					exact: formatExactDuration(durationMs, t)
 				};
 				const metrics = [tokenMetric, durationMetric?.exact].filter((value) => value !== undefined).join(" · ");
-				const isExpanded = expanded.has(entry.id);
+				const isExpanded = expanded.has(entry.id) || filtering;
 				const open = () => {
 					openChild({ parentSessionId, childSessionId: entry.id, mode: entry.mode });
 					closeCatalog();
@@ -681,7 +1111,7 @@ window.__ModuleLoader__.load({
 					closeCatalog();
 				};
 				const onKeyDown = (event) => {
-					if (knownLeaf) return;
+					if (knownLeaf || filtering) return;
 					if (event.key === "ArrowRight" && !isExpanded) {
 						event.preventDefault();
 						toggleBranch(entry.id);
@@ -704,7 +1134,9 @@ window.__ModuleLoader__.load({
 				},
 					knownLeaf
 						? reserveDisclosure ? h("span", { className: "smgm-disclosureSpace" }) : null
-						: h("button", {
+						: filtering
+							? h("span", { className: "smgm-disclosure smgm-disclosureOpen" }, h(Chevron, {}))
+							: h("button", {
 							type: "button",
 							className: classNames("smgm-disclosure", isExpanded && "smgm-disclosureOpen"),
 							"aria-label": t(isExpanded ? "branch.collapse" : "branch.expand", { label }),
@@ -720,11 +1152,27 @@ window.__ModuleLoader__.load({
 							h("span", { className: classNames("smgm-label", isCurrent && "smgm-currentLabel") }, label),
 							h("span", { className: "smgm-summary" }, secondary)),
 						h("span", { className: "smgm-metrics" },
-							h("span", { className: "smgm-metricToken" }, tokenMetric ?? ""),
+							h("span", {
+								className: "smgm-metricToken",
+								title: tokenMetric === undefined ? undefined
+									: rowCacheHit === null ? t("tokens.exactTitle", { value: formatExactTokens(totalTokens) })
+										: t("tokens.cacheTitle", { value: formatExactTokens(totalTokens), percent: rowCacheHit })
+							}, tokenMetric ?? ""),
 							h("span", {
 								className: "smgm-metricDuration",
 								title: durationMetric === undefined ? undefined : t("duration.exactTitle", { duration: durationMetric.exact })
 							}, durationMetric?.compact ?? "")),
+						h("button", {
+							type: "button",
+							className: "smgm-faceButton",
+							title: t("face.open"),
+							"aria-label": t("face.open.aria", { label }),
+							onClick: (event) => {
+								event.preventDefault();
+								event.stopPropagation();
+								inspectFace(entry.id, label, activity === "running");
+							}
+						}, h(FaceGlyph)),
 						isCurrent ? null : h("button", {
 							type: "button",
 							className: "smgm-sidebarButton",
@@ -750,10 +1198,365 @@ window.__ModuleLoader__.load({
 					refreshProjection,
 					toggleBranch,
 					closeCatalog,
+					inspectFace,
+					filter,
 					t
 				})) : null;
 				return h("div", { className: "smgm-node", key: entry.id }, row, children);
 			}));
+		}
+		//#endregion
+		//#region filter and totals
+		/**
+		 * The filter row above the tree: a free-text box plus running/finished and
+		 * one-shot-only switches. The controls narrow what is already loaded and
+		 * never start a fetch, so a filter can hide rows but never discover one.
+		 * @param t - the translator.
+		 * @param filter - the active filter.
+		 * @param onChange - receives a partial filter patch.
+		 * @returns the row.
+		 */
+		function CatalogControls({ t, filter, onChange }) {
+			const chip = (label, active, onClick) => h("button", {
+				type: "button",
+				className: classNames("smgm-chip", active && "smgm-chipOn"),
+				"aria-pressed": active ? "true" : "false",
+				onClick
+			}, label);
+			return h("div", { className: "smgm-controls" },
+				h("input", {
+					type: "search",
+					className: "smgm-search",
+					value: filter.text,
+					placeholder: t("controls.placeholder"),
+					"aria-label": t("controls.searchAria"),
+					onKeyDown: (event) => event.stopPropagation(),
+					onChange: (event) => onChange({ text: event.target.value })
+				}),
+				h("div", { className: "smgm-chips" },
+					chip(t("filter.all"), filter.activity === "all", () => onChange({ activity: "all" })),
+					chip(t("filter.inactive"), filter.activity === "inactive", () => onChange({ activity: "inactive" })),
+					chip(t("filter.oneShot"), filter.oneShot === true, () => onChange({ oneShot: filter.oneShot !== true })),
+					filterActive(filter) ? h("button", {
+						type: "button",
+						className: "smgm-chip smgm-chipClear",
+						title: t("controls.clear"),
+						"aria-label": t("controls.clear"),
+						onClick: () => onChange({ text: "", activity: "all", oneShot: false })
+					}, h("span", { "aria-hidden": "true" }, "\u00d7")) : null));
+		}
+		/**
+		 * The totals strip under the controls, laid out as one line of counts and
+		 * one line of usage so neither wraps into the other: rows loaded, rows
+		 * running and rows without usage data, then summed tokens (the session on
+		 * screen among them), the cache-hit share of prompt-side input, and wall
+		 * time — then, on request, those same rows grouped by the model behind them,
+		 * each group carrying its own share. The totals cover, and name beside them,
+		 * the session this tree hangs off: it is the one session here whose usage is
+		 * never a row. A model is named only inside a session
+		 * log, so that grouping is read on demand instead of watched.
+		 * @param t - the translator.
+		 * @param totals - totals over every loaded row under the active filter, plus
+		 *   the on-screen session's own usage as `totals.self`.
+		 * @param nodes - one entry per counted row, for the model grouping; the
+		 * @param models - session id → model batch answer.
+		 * @param modelState - "idle" | "loading" | "ready" | "error".
+		 * @param onFetchModels - loads or reloads the model batch.
+		 * @returns the strip.
+		 */
+		function CatalogSummary({ t, totals, nodes, models, modelState, onFetchModels }) {
+			const { groups } = useMemo(() => groupModels(nodes, models), [nodes, models]);
+			// The session on screen is counted too, so an empty tree still has
+			// numbers: only "nothing at all was counted" is nothing to show.
+			if (totals.count === 0 && totals.self === null) return h("div", { className: "smgm-totals" },
+				h("span", { className: "smgm-summaryHint" }, t("totals.none")));
+			const partial = totals.unknownTokens === 0 ? null : h("span", { className: "smgm-summaryHint" },
+				t("totals.partial", { count: totals.unknownTokens }));
+			const cacheHit = cacheHitPercent(totals.cacheRead, totals.billedInput);
+			const shareTitle = (hit, read, billed) => t("cache.exactTitle", {
+				hit: formatExactTokens(read),
+				prompt: formatExactTokens(billed),
+				missed: formatExactTokens(Math.max(0, billed - read))
+			});
+			const cacheItem = cacheHit === null ? null : h("span", {
+				className: "smgm-totalsItem",
+				title: t("cache.stripTitle", {
+					hit: formatExactTokens(totals.cacheRead),
+					written: formatExactTokens(totals.cacheWrite),
+					prompt: formatExactTokens(totals.billedInput),
+					missed: formatExactTokens(Math.max(0, totals.billedInput - totals.cacheRead))
+				})
+			}, t("cache.percent", { percent: cacheHit }));
+			// Naming the session's own share inside the token item, rather than as a
+			// further item, is what keeps the usage line to two lines in a 336px menu
+			// while the totals stay readable: the aggregate includes it and says by
+			// how much, and the hover text keeps the exact split.
+			const selfShare = totals.self === null ? null : t("totals.selfTitle", {
+				hit: formatExactTokens(totals.self.cacheRead),
+				written: formatExactTokens(totals.self.cacheWrite),
+				prompt: formatExactTokens(totals.self.billedInput),
+				missed: formatExactTokens(Math.max(0, totals.self.billedInput - totals.self.cacheRead))
+			});
+			const totalsItem = selfShare === null
+				? h("span", { className: "smgm-totalsItem" }, t("totals.tokens", { value: formatTokens(totals.tokens, t) }))
+				: h("span", { className: "smgm-totalsItem", title: selfShare },
+					t("totals.tokensWithSelf", {
+						value: formatTokens(totals.tokens, t),
+						self: formatTokens(totals.self.tokens, t)
+					}));
+			const groupsBody = groups.length === 0 ? h("span", { className: "smgm-summaryHint" }, t("models.empty"))
+				: groups.map((group) => {
+					const share = cacheHitPercent(group.cacheRead, group.billedInput);
+					return h("div", { className: "smgm-modelRow", key: group.model === null ? "unknown" : group.model.key },
+						h("span", {
+							className: "smgm-modelName",
+							title: group.model === null ? t("models.unknownNote")
+								: group.model.delegated ? t("models.delegated") : group.model.key
+						}, group.model === null ? t("models.unknown") : group.model.name),
+						group.model?.delegated === true ? h("span", { className: "smgm-summaryHint" }, t("models.delegated")) : null,
+						h("span", { className: "smgm-totalsItem" }, t("totals.tokens", { value: formatTokens(group.tokens, t) })),
+						share === null ? null : h("span", {
+							className: "smgm-totalsItem",
+							title: shareTitle(share, group.cacheRead, group.billedInput)
+						}, t("cache.percent", { percent: share })),
+						h("span", { className: "smgm-summaryHint" }, t("models.times", { count: group.count })));
+				});
+			const modelsBody = modelState === "loading" ? h("span", { className: "smgm-summaryHint" }, t("models.loading"))
+				: modelState === "error" ? h("span", { className: "smgm-modelError" }, t("models.failed"))
+					: modelState === "ready" ? h("div", { className: "smgm-models" }, groupsBody)
+						: null;
+			return h(React.Fragment, null,
+				h("div", { className: "smgm-totals" },
+					h("span", { className: "smgm-totalsItem" }, t("totals.loaded", { count: totals.count })),
+					totals.running === 0 ? null : h("span", { className: "smgm-totalsItem" }, t("totals.running", { count: totals.running })),
+					// The rows without usage are a count like the two above, and the
+					// amounts line below stays three items wide either way, so the
+					// strip keeps its two lines however many rows lack projections.
+					partial),
+				h("div", { className: "smgm-totals" },
+					totalsItem,
+					cacheItem,
+					h("span", { className: "smgm-totalsItem", title: formatExactDuration(totals.durationMs, t) },
+						t("totals.duration", { duration: formatDuration(totals.durationMs, t) }))),
+				h("div", { className: "smgm-modelHead" },
+					h("button", {
+						type: "button",
+						className: "smgm-chip",
+						onClick: onFetchModels
+					}, t(modelState === "ready" ? "models.refetch" : "models.fetch")),
+					modelState === "idle" ? h("span", { className: "smgm-summaryHint" }, t("models.hint")) : null),
+				modelsBody);
+		}
+		//#endregion
+		//#region capability face
+		/**
+		 * Render the id-card glyph that opens one subagent's capability face.
+		 * @returns the glyph element.
+		 */
+		function FaceGlyph() {
+			return h("svg", {
+				width: "16",
+				height: "16",
+				viewBox: "0 0 20 20",
+				fill: "none",
+				"aria-hidden": "true"
+			},
+				h("rect", { x: "2.6", y: "4.25", width: "14.8", height: "11.5", rx: "2.25", stroke: "currentColor", strokeWidth: "1.4" }),
+				h("circle", { cx: "7", cy: "8.9", r: "1.7", stroke: "currentColor", strokeWidth: "1.3" }),
+				h("path", { d: "M4.5 12.7c.5-1.1 1.4-1.7 2.5-1.7s2 .6 2.5 1.7", stroke: "currentColor", strokeWidth: "1.3", strokeLinecap: "round" }),
+				h("path", { d: "M11.7 8.3h3.4M11.7 11.3h3.4", stroke: "currentColor", strokeWidth: "1.3", strokeLinecap: "round" }));
+		}
+		/**
+		 * Render the back chevron of the capability face head.
+		 * @returns the glyph element.
+		 */
+		function BackGlyph() {
+			return h("svg", {
+				width: "13",
+				height: "13",
+				viewBox: "0 0 20 20",
+				fill: "none",
+				"aria-hidden": "true"
+			}, h("path", {
+				d: "M12 4.5L7 10l5 5.5",
+				stroke: "currentColor",
+				strokeWidth: "1.5",
+				strokeLinecap: "round",
+				strokeLinejoin: "round"
+			}));
+		}
+		/**
+		 * Serialize one tool parameter schema for display, bounded so a wide schema
+		 * cannot flood the panel.
+		 * @param value - the schema object.
+		 * @returns pretty JSON, truncated past 4000 characters.
+		 */
+		function faceJson(value) {
+			let text;
+			try {
+				text = JSON.stringify(value ?? {}, null, 2);
+			} catch {
+				return "";
+			}
+			return text.length > 4000 ? `${text.slice(0, 4000)}\n…` : text;
+		}
+		/**
+		 * Read-only capability face of one subagent: what its delegation wrote, the
+		 * tools and model of its last request, the skills its preset sees, and the
+		 * persona it was given. The host derives all of it (`faceFor`), because a
+		 * subagent's tools and persona live in that subagent's own durable log;
+		 * this component only renders what came back.
+		 * @param props.sessionId - the subagent session to describe.
+		 * @param props.label - its display label, for the head.
+		 * @param props.parentSessionId - the open session, used as the parent hint.
+		 * @param props.running - whether that subagent is running right now.
+		 * @param props.t - translate function.
+		 * @param props.onBack - return to the catalog tree.
+		 * @returns the panel element.
+		 */
+		function CapabilityPanel({ sessionId, label, parentSessionId, running, t, onBack }) {
+			const [state, setState] = useState({ status: "loading" });
+			const [attempt, setAttempt] = useState(0);
+
+			useEffect(() => {
+				const abort = new AbortController();
+				let live = true;
+				setState({ status: "loading" });
+				const parameters = new URLSearchParams({ sessionId });
+				if (parentSessionId !== undefined) parameters.set("parent", parentSessionId);
+				fetch(`${FACE_ROUTE}?${parameters.toString()}`, {
+					signal: abort.signal,
+					headers: { accept: "application/json" }
+				})
+					.then(async (response) => {
+						const payload = await response.json().catch(() => undefined);
+						if (!response.ok) throw new Error(payload?.error ?? `HTTP ${response.status}`);
+						return payload;
+					})
+					.then((payload) => {
+						if (live) setState({ status: "ready", value: payload });
+					})
+					.catch((error) => {
+						if (live && error?.name !== "AbortError") setState({ status: "failed", error: `${error?.message ?? error}` });
+					});
+				return () => {
+					live = false;
+					abort.abort();
+				};
+			}, [sessionId, parentSessionId, attempt]);
+
+			/** One titled section: its head, then whatever the caller renders. */
+			const section = (title, meta, children) => h("div", { className: "smgm-faceSection" },
+				h("div", { className: "smgm-faceSectionHead" },
+					h("span", { className: "smgm-faceSectionTitle" }, title),
+					meta),
+				children);
+			/** One labelled row of the identity grid; empty values are dropped. */
+			const rows = (pairs) => h("div", { className: "smgm-faceGrid" },
+				pairs
+					.filter((pair) => pair[1] !== undefined && pair[1] !== null && pair[1] !== "")
+					.map((pair) => h(React.Fragment, { key: pair[0] },
+						h("span", { className: "smgm-faceKey" }, pair[0]),
+						h("span", { className: "smgm-faceValue" }, pair[1]))));
+
+			const mode = state.value?.subagent?.mode;
+			const modeKey = mode === "continuable" ? "mode.continuable" : mode === "one-shot" ? "mode.oneShot" : "mode.unknown";
+			const head = h("div", { className: "smgm-faceHead" },
+				h("button", {
+					type: "button",
+					className: "smgm-faceBack",
+					onClick: onBack
+				}, h(BackGlyph), h("span", null, t("face.back"))),
+				h("span", { className: "smgm-faceTitle", title: label ?? sessionId }, label ?? sessionId),
+				h("span", { className: "smgm-faceChip" }, t(modeKey)));
+
+			if (state.status === "loading") {
+				return h("div", { className: "smgm-face" }, head, h("div", { className: "smgm-faceLoading" }, t("face.loading")));
+			}
+			if (state.status === "failed") {
+				return h("div", { className: "smgm-face" }, head,
+					h("div", { className: "smgm-faceError" }, `${t("face.failed")}: ${state.error}`),
+					h("div", { className: "smgm-faceHead" }, h("button", {
+						type: "button",
+						className: "smgm-setBtn smgm-setBtnGhost",
+						onClick: () => setAttempt((current) => current + 1)
+					}, t("retry"))));
+			}
+
+			const value = state.value ?? {};
+			const subagent = value.subagent ?? {};
+			const session = value.session ?? {};
+			const run = value.run ?? {};
+			const tools = Array.isArray(value.tools) ? value.tools : [];
+			const skills = value.skills ?? {};
+			const skillEntries = Array.isArray(skills.entries) ? skills.entries : [];
+			const persona = value.persona ?? null;
+			const filter = subagent.toolFilter ?? null;
+			const model = [run.provider, run.model].filter(Boolean).join(" / ");
+			const delegatedModel = [subagent.agentModel, subagent.agentReasoningEffort].filter(Boolean).join(" / ");
+			const filterText = filter === null
+				? ""
+				: [
+					Array.isArray(filter.allow) && filter.allow.length > 0 ? `${t("face.filter.allow")}: ${filter.allow.join(", ")}` : "",
+					Array.isArray(filter.deny) && filter.deny.length > 0 ? `${t("face.filter.deny")}: ${filter.deny.join(", ")}` : ""
+				].filter(Boolean).join(" · ");
+
+			const profile = section(t("face.section.profile"), null, h(React.Fragment, null,
+				rows([
+					[t("face.mode"), t(modeKey)],
+					[t("face.state"), t(running === true ? "activity.running" : "activity.inactive")],
+					[t("face.launch"), subagent.provider],
+					[t("face.preset"), session.agentPreset],
+					[t("face.model"), model],
+					[t("face.delegatedModel"), delegatedModel === run.model ? "" : delegatedModel],
+					[t("face.cwd"), session.cwd],
+					[t("face.depth"), session.delegationDepth],
+					[t("face.parent"), session.parentSession ?? parentSessionId],
+					[t("face.created"), session.createdAt === null || session.createdAt === undefined ? "" : new Date(session.createdAt).toLocaleString()]
+				]),
+				filterText === "" ? null : h("span", { className: "smgm-faceNote smgm-faceFilter" }, `${t("face.filter")} · ${filterText}`)));
+			const toolSection = section(t("face.section.tools"), h("span", { className: "smgm-faceCount" }, t("face.tools.count", { count: tools.length })),
+				tools.length === 0
+					? h("div", { className: "smgm-faceEmpty" }, t("face.tools.empty"))
+					: h(React.Fragment, null,
+						h("span", { className: "smgm-faceNote" }, t("face.tools.source")),
+						tools.map((tool) => h("div", { className: "smgm-faceItem", key: tool.name },
+							h("span", { className: "smgm-faceItemName" },
+								tool.name,
+								tool.deferLoading === true ? h("span", { className: "smgm-faceItemFlag" }, ` · ${t("face.tools.deferred")}`) : null),
+							tool.description === undefined || tool.description === "" ? null : h("span", { className: "smgm-faceItemDesc" }, tool.description),
+							h("details", null,
+								h("summary", { className: "smgm-faceItemFlag" }, t("face.tools.params")),
+								h("pre", { className: "smgm-faceParams" }, faceJson(tool.parameters)))))));
+			const skillSection = section(t("face.section.skills"),
+				skills.state === "ok" ? h("span", { className: "smgm-faceCount" }, t("face.skills.count", { count: skillEntries.length })) : null,
+				skills.state === "unavailable"
+					? h("div", { className: "smgm-faceEmpty" }, t("face.skills.unavailable"))
+					: skills.state === "error"
+						? h("div", { className: "smgm-faceEmpty" }, t("face.skills.failed", { error: skills.error ?? "" }))
+						: skillEntries.length === 0
+							? h("div", { className: "smgm-faceEmpty" }, t("face.skills.empty"))
+							: skillEntries.map((entry) => h("div", { className: "smgm-faceItem", key: entry.name },
+								h("span", { className: "smgm-faceItemName" },
+									entry.name,
+									entry.modelInvocable === true ? null : h("span", { className: "smgm-faceItemFlag" }, ` · ${t("face.skills.agentOnly")}`)),
+								entry.description === undefined || entry.description === "" ? null : h("span", { className: "smgm-faceItemDesc" }, entry.description),
+								entry.whenToUse === undefined || entry.whenToUse === "" ? null : h("span", { className: "smgm-faceItemDesc" }, entry.whenToUse))));
+			const personaLabel = persona?.source === "descriptor"
+				? "face.persona.recorded"
+				: persona?.generated === true ? "face.persona.generated" : "face.persona.inferred";
+			const personaSection = section(t("face.section.persona"),
+				persona === null ? null : h("span", { className: "smgm-faceCount" }, t(personaLabel)),
+				persona === null
+					? h("div", { className: "smgm-faceEmpty" }, t("face.persona.empty"))
+					: h(React.Fragment, null,
+						persona.generated === true ? h("span", { className: "smgm-faceNote" }, t("face.persona.generatedNote")) : null,
+						h("pre", { className: "smgm-facePre" }, persona.text),
+						persona.replaced === null || persona.replaced === undefined ? null : h(React.Fragment, null,
+							h("span", { className: "smgm-faceNote" }, t("face.persona.replaced")),
+							h("pre", { className: "smgm-facePre" }, persona.replaced))));
+
+			return h("div", { className: "smgm-face" }, head, profile, toolSection, skillSection, personaSection);
 		}
 		//#endregion
 		//#region catalog trigger
@@ -778,6 +1581,15 @@ window.__ModuleLoader__.load({
 			const [open, setOpen] = useState(false);
 			const [menuPosition, setMenuPosition] = useState(undefined);
 			const [expanded, setExpanded] = useState(() => new Set());
+			/** The subagent whose capability face replaces the tree, if any. */
+			const [face, setFace] = useState(undefined);
+			/** The filter narrowing the tree; empty and "all" until the user acts. */
+			const [filter, setFilter] = useState({ text: "", activity: "all", oneShot: false });
+			/** session id → model answer, filled only when the user asks for them. */
+			const [models, setModels] = useState(() => new Map());
+			/** "idle" until the first model read, then "loading" | "ready" | "error". */
+			const [modelState, setModelState] = useState("idle");
+			const [now, setNow] = useState(() => Date.now());
 			const rootRef = useRef(null);
 			const triggerRef = useRef(null);
 			const menuRef = useRef(null);
@@ -801,17 +1613,48 @@ window.__ModuleLoader__.load({
 			// loads; the count trigger keeps the shipped rule of error-or-children.
 			const presentedCatalog = catalog ?? (variant === "switcher" ? { entries: [], state: "loading", error: null } : undefined);
 			const visible = presentedCatalog !== undefined && (variant === "switcher" || presentedCatalog.state === "error" || presentedCatalog.entries.length > 0);
+			const panelHead = presentedCatalog !== undefined && presentedCatalog.state !== "error";
+
+			// Wall clock for the running rows, ticking only while the menu is open.
+			useEffect(() => {
+				if (!open) return undefined;
+				const timer = setInterval(() => setNow(Date.now()), 1000);
+				return () => clearInterval(timer);
+			}, [open]);
+
+			const filtering = filterActive(filter);
+			const totals = useMemo(() => catalogTotals(presentedCatalog, filtering ? filter : undefined, projections, summaries, statuses, now, currentSessionId),
+				[presentedCatalog, filter, filtering, projections, summaries, statuses, now, currentSessionId]);
+			const patchFilter = useCallback((patch) => setFilter((current) => ({ ...current, ...patch })), []);
+			const fetchModels = useCallback(async () => {
+				const ids = [...new Set(totals.nodes.map((node) => node.id))];
+				if (ids.length === 0) return;
+				setModelState("loading");
+				try {
+					const response = await fetch(`${MODELS_ROUTE}?sessionIds=${encodeURIComponent(ids.join(","))}`);
+					if (!response.ok) throw new Error(`HTTP ${response.status}`);
+					const payload = await response.json();
+					const answers = payload === null || typeof payload !== "object" ? [] : payload.entries ?? [];
+					setModels(new Map(answers
+						.filter((answer) => answer !== null && typeof answer === "object" && typeof answer.sessionId === "string")
+						.map((answer) => [answer.sessionId, answer])));
+					setModelState("ready");
+				} catch (error) {
+					console.warn("[subagent-mgm] could not read the models", error);
+					setModelState("error");
+				}
+			}, [totals.nodes]);
 
 			const positionMenu = useCallback(() => {
 				const trigger = triggerRef.current;
 				if (trigger === null) return;
 				const rect = trigger.getBoundingClientRect();
-				const width = Math.min(MENU_WIDTH, window.innerWidth - MENU_VIEWPORT_MARGIN * 2);
+				const width = Math.min(face === undefined ? MENU_WIDTH : MENU_WIDTH_WIDE, window.innerWidth - MENU_VIEWPORT_MARGIN * 2);
 				setMenuPosition({
 					top: rect.bottom + 5,
 					left: Math.min(Math.max(MENU_VIEWPORT_MARGIN, rect.left), window.innerWidth - width - MENU_VIEWPORT_MARGIN)
 				});
-			}, []);
+			}, [face]);
 
 			const changeOpen = useCallback((next) => {
 				if (next) {
@@ -819,6 +1662,7 @@ window.__ModuleLoader__.load({
 					correctedRef.current = false;
 				} else {
 					setExpanded(new Set());
+					setFace(undefined);
 				}
 				setOpen(next);
 			}, [positionMenu]);
@@ -853,6 +1697,15 @@ window.__ModuleLoader__.load({
 				pinnedRef.current = false;
 				changeOpen(false);
 			}, [changeOpen]);
+			/**
+			 * Swap the tree for one subagent's capability face. The menu stays pinned
+			 * open: that face is a place to read, not a hover target.
+			 */
+			const inspectFace = useCallback((childSessionId, childLabel, childRunning) => {
+				pinnedRef.current = true;
+				cancelHoverClose();
+				setFace({ id: childSessionId, label: childLabel, running: childRunning === true });
+			}, [cancelHoverClose]);
 
 			useEffect(() => () => {
 				cancelHoverOpen();
@@ -900,6 +1753,13 @@ window.__ModuleLoader__.load({
 				}));
 			}, [open, menuPosition]);
 
+			// The capability face is wider than the tree, so re-anchor the menu to its
+			// trigger once that width is in effect.
+			useEffect(() => {
+				if (!open || face === undefined) return;
+				positionMenu();
+			}, [open, face, positionMenu]);
+
 			useEffect(() => {
 				if (!open || !focusFirstRef.current) return;
 				focusFirstRef.current = false;
@@ -944,6 +1804,13 @@ window.__ModuleLoader__.load({
 					items[items.length - 1].focus();
 				}
 			}, [changeOpen]);
+
+			/** In the capability face, Escape steps back to the tree, not out of it. */
+			const onFaceKeyDown = useCallback((event) => {
+				if (event.key !== "Escape") return;
+				event.preventDefault();
+				setFace(undefined);
+			}, []);
 
 			// Collapsing a branch drops its whole subtree, so expanding it again
 			// refetches instead of showing rows that were never loaded.
@@ -1006,31 +1873,53 @@ window.__ModuleLoader__.load({
 
 			const menu = !open ? null : h("div", {
 				ref: menuRef,
-				className: "smgm-menu",
+				className: classNames("smgm-menu", face !== undefined && "smgm-menuWide"),
 				style: menuPosition,
 				onMouseEnter: cancelHoverClose,
 				onMouseLeave: scheduleHoverClose
-			}, h("div", {
-				className: "smgm-menuBody",
-				role: "tree",
-				"aria-label": t("tree.aria"),
-				onKeyDown: onMenuKeyDown
-			}, h(CatalogRows, {
-				parentSessionId: rootSessionId,
-				currentSessionId,
-				catalog: presentedCatalog,
-				projections,
-				summaries,
-				statuses,
-				expanded,
-				level: 1,
-				openChild,
-				openChildAside,
-				refreshProjection,
-				toggleBranch,
-				closeCatalog,
-				t
-			})));
+			}, face !== undefined
+				? h("div", {
+					className: "smgm-menuBody",
+					role: "dialog",
+					"aria-label": t("face.title"),
+					onKeyDown: onFaceKeyDown
+				}, h(CapabilityPanel, {
+					sessionId: face.id,
+					label: face.label,
+					parentSessionId: rootSessionId,
+					running: face.running,
+					t,
+					onBack: () => setFace(undefined)
+				}))
+				: h("div", {
+					className: "smgm-menuBody",
+					onKeyDown: onMenuKeyDown
+				},
+					panelHead ? h("div", { className: "smgm-head" },
+						h(CatalogControls, { t, filter, onChange: patchFilter }),
+						h(CatalogSummary, { t, totals, nodes: totals.nodes, models, modelState, onFetchModels: fetchModels })) : null,
+					h("div", {
+						className: "smgm-tree",
+						role: "tree",
+						"aria-label": t("tree.aria")
+					}, h(CatalogRows, {
+						parentSessionId: rootSessionId,
+						currentSessionId,
+						catalog: presentedCatalog,
+						projections,
+						summaries,
+						statuses,
+						expanded,
+						level: 1,
+						openChild,
+						openChildAside,
+						refreshProjection,
+						toggleBranch,
+						closeCatalog,
+						inspectFace,
+						filter: filtering ? filter : undefined,
+						t
+					}))));
 
 			return h("span", {
 				className: classNames("smgm-root", isSwitcher && "smgm-switcherRoot"),
@@ -1131,6 +2020,11 @@ window.__ModuleLoader__.load({
 		 * Keep one right-sidebar chat panel per running direct subagent of the
 		 * on-screen session, and drop it when that subagent ends. A panel the user
 		 * closes while its subagent is still running stays closed for that run.
+		 *
+		 * Closing is not confined to the session on screen: the tab inventory spans
+		 * every saved and adopted session, and a subagent that ends while its parent
+		 * sits in the background still has to give its panel up. Otherwise that
+		 * parent's sidebar shows the finished chat again the moment it is selected.
 		 * @param ctx - client context carrying the sidebar-right and session stores.
 		 * @returns a disposer releasing every subscription.
 		 */
@@ -1160,10 +2054,16 @@ window.__ModuleLoader__.load({
 				if (values?.subagentCatalog !== undefined) return values.subagentCatalog;
 				return list.byId?.[parentSessionId]?.projectionValues?.subagentCatalog;
 			};
-			const readPanels = (parentSessionId) => {
+			/** Every chat panel open right now, whichever session owns it. */
+			const readChatPanels = () => {
 				const tabs = inventory.getSnapshot() ?? [];
-				return tabs.filter((tab) => tab !== null && typeof tab === "object" && tab.sessionId === parentSessionId && tab.kind === CHAT_KIND);
+				return tabs.filter((tab) => tab !== null && typeof tab === "object" && tab.kind === CHAT_KIND);
 			};
+			const readPanels = (parentSessionId) => readChatPanels().filter((tab) => tab.sessionId === parentSessionId);
+			/** Whether the inventory still carries this record, i.e. the close did not land. */
+			const isOpen = (tab) => (inventory.getSnapshot() ?? []).some(
+				(open) => open !== null && typeof open === "object" && open.sessionId === tab.sessionId && open.tabId === tab.tabId
+			);
 			const isRunning = (childSessionId) => {
 				const status = ctx.uiSession.sessionStatus.getSnapshot().get(childSessionId);
 				if (status !== undefined && status.running !== undefined) return status.running;
@@ -1173,52 +2073,74 @@ window.__ModuleLoader__.load({
 			const reconcile = () => {
 				const settings = settingsStore.getSnapshot();
 				const current = sidebar.mounted.getSnapshot();
-				if (current === undefined) {
-					mounted = undefined;
-					return;
-				}
 				if (mounted !== current) {
 					mounted = current;
-					seen.clear();
-					wasRunning.clear();
+					// Run state is keyed by the child, never by the session on screen:
+					// a run that ends in the background still has to be recognised as
+					// one, so these sets survive a session switch and only the focus
+					// record and the projection retry are rebound.
 					handled.clear();
 					refreshed.clear();
 				}
-				const catalog = readCatalog(mounted);
+				// Closing comes first and covers every session, on screen or not: the
+				// inventory spans saved and adopted sessions alike, and a tab left
+				// standing is exactly what a background session shows as a finished
+				// chat the next time it is selected.
+				const panelChildren = new Set();
+				for (const tab of readChatPanels()) {
+					const child = panelChildId(tab.contentId);
+					if (child === undefined) continue;
+					panelChildren.add(child);
+					if (isRunning(child)) {
+						wasRunning.add(child);
+						continue;
+					}
+					if (settings.autoClose && wasRunning.has(child)) {
+						try {
+							sidebar.closeIn(tab.sessionId, tab.tabId);
+						} catch (error) {
+							console.error("[subagent-mgm] closing an ended subagent panel failed", error);
+						}
+						// A session whose store the runtime never minted cannot take the
+						// close: keeping the run lets the pass that mounts its seat
+						// retry, and pruning forgets it once the tab is gone.
+						if (isOpen(tab)) continue;
+					}
+					// The run is over, so no trace of it may outlive it — including
+					// this plugin's own close, which must never read as a user close
+					// when the parent resumes the same child.
+					wasRunning.delete(child);
+					seen.delete(child);
+					handled.delete(child);
+					suppressed.delete(child);
+				}
+				if (current === undefined) return;
+				const catalog = readCatalog(current);
 				if (catalog === undefined) {
-					if (!refreshed.has(mounted)) {
-						refreshed.add(mounted);
-						ctx.sessions.refreshProjections(mounted).catch(() => {});
+					if (!refreshed.has(current)) {
+						refreshed.add(current);
+						ctx.sessions.refreshProjections(current).catch(() => {});
 					}
 					return;
 				}
-				const panels = readPanels(mounted);
+				const panels = readPanels(current);
 				const present = new Set();
 				for (const entry of catalog) {
 					if (entry === null || typeof entry !== "object" || typeof entry.id !== "string") continue;
 					present.add(entry.id);
-					const address = chatAddress(mounted, entry.id, entry.mode);
+					const address = chatAddress(current, entry.id, entry.mode);
 					const panel = panels.find((tab) => panelChildId(tab.contentId) === entry.id);
-					const running = isRunning(entry.id);
 					if (panel !== undefined) {
 						seen.add(entry.id);
 						suppressed.delete(entry.id);
 					}
-					if (!running) {
-						if (settings.autoClose && panel !== undefined && wasRunning.has(entry.id)) {
-							try {
-								sidebar.closeIn(mounted, panel.tabId);
-							} catch (error) {
-								console.error("[subagent-mgm] closing an ended subagent panel failed", error);
-							}
-						}
+					if (!isRunning(entry.id)) {
+						// The panel of a finished run was closed above, wherever its
+						// session lives; here only that run's bookkeeping is dropped.
 						wasRunning.delete(entry.id);
-						handled.delete(entry.id);
-						// A finished run forgets the observation, so this plugin's own
-						// close can never be mistaken for the user closing the panel
-						// when the parent resumes the same child.
 						seen.delete(entry.id);
-						if (panel === undefined) suppressed.delete(entry.id);
+						handled.delete(entry.id);
+						suppressed.delete(entry.id);
 						continue;
 					}
 					wasRunning.add(entry.id);
@@ -1239,16 +2161,21 @@ window.__ModuleLoader__.load({
 					// shipped dropdown opened under another mode is never duplicated.
 					const target = panel === undefined ? address : panel.contentId;
 					try {
-						sidebar.openResourceIn(mounted, target, { kind: CHAT_KIND });
+						sidebar.openResourceIn(current, target, { kind: CHAT_KIND });
 					} catch (error) {
 						suppressed.add(entry.id);
 						console.error("[subagent-mgm] opening a subagent panel failed", error);
 					}
 				}
-				for (const childSessionId of [...seen]) if (!present.has(childSessionId)) seen.delete(childSessionId);
-				for (const childSessionId of [...wasRunning]) if (!present.has(childSessionId)) wasRunning.delete(childSessionId);
-				for (const childSessionId of [...handled]) if (!present.has(childSessionId)) handled.delete(childSessionId);
-				for (const childSessionId of [...suppressed]) if (!present.has(childSessionId)) suppressed.delete(childSessionId);
+				// A child is forgotten only once no catalog, no open panel and no run
+				// of its own still names it — a child of a background session is kept
+				// for exactly as long as it can still have a panel to give up.
+				const keep = (childSessionId) =>
+					present.has(childSessionId) || panelChildren.has(childSessionId) || isRunning(childSessionId);
+				for (const childSessionId of [...seen]) if (!keep(childSessionId)) seen.delete(childSessionId);
+				for (const childSessionId of [...wasRunning]) if (!keep(childSessionId)) wasRunning.delete(childSessionId);
+				for (const childSessionId of [...handled]) if (!keep(childSessionId)) handled.delete(childSessionId);
+				for (const childSessionId of [...suppressed]) if (!keep(childSessionId)) suppressed.delete(childSessionId);
 			};
 
 			const schedule = () => {
