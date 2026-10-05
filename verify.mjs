@@ -651,12 +651,13 @@ check("the head, filter and totals stylesheet ships with the client half",
 		.every((name) => source.includes("." + name + "{")), true);
 check("the tree indents through its own container, not the scrolling body",
 	source.includes(".smgm-tree>.smgm-node{" ) && !source.includes(".smgm-menuBody>.smgm-node{"), true);
-check("both dictionaries translate the filter and the totals", [
+check("both dictionaries translate the filter, the totals and the hover card", [
 	"controls.placeholder", "controls.searchAria", "controls.clear", "filter.all", "filter.inactive",
 	"filter.oneShot", "filter.empty", "totals.loaded", "totals.running", "totals.tokens", "totals.duration",
 	"totals.none", "totals.partial", "totals.tokensWithSelf", "totals.selfTitle", "models.fetch", "models.refetch", "models.hint", "models.loading",
 	"models.failed", "models.empty", "models.unknown", "models.unknownNote", "models.delegated", "models.times",
-	"cache.percent", "cache.exactTitle", "cache.stripTitle", "tokens.exactTitle", "tokens.cacheTitle"
+	"cache.percent", "cache.exactTitle", "cache.stripTitle", "tokens.exactTitle", "tokens.cacheTitle", "hover.more",
+	"hover.selfTokens", "hover.workTime", "hover.workTitle"
 ].every((key) => (source.split(JSON.stringify(key) + ":").length - 1) === 2), true);
 check("the cache share has its own helper pair",
 	/function billedInputTokens\(usage\)/.test(source) && /function cacheHitPercent\(cacheReadTokens, promptTokens\)/.test(source), true);
@@ -890,6 +891,242 @@ check("an empty tree still states the session's own numbers",
 	/if \(totals\.count === 0 && totals\.self === null\)/.test(totalsSource), true);
 check("the dropdown totals the session it is showing",
 	/catalogTotals\(presentedCatalog, filtering \? filter : undefined, projections, summaries, statuses, now, currentSessionId\)/.test(drop), true);
+
+// The same digest, smaller, in a sidebar Session row's hover card. The seat hands
+// over the row's Session id alone, so the card subscribes to the two client stores
+// itself and asks the host for nothing: it is a read-only view of what the browser
+// already holds, and the numbers are the strip's numbers with no filter.
+const hoverSource = source.slice(
+	source.indexOf("function SessionRowHover({ sessionId, useHoverStores, t })"),
+	source.indexOf("function SubagentMgrLineage(")
+);
+check("the hover digest fills the sidebar row's own seat",
+	/ctx\.slots\.inject\("sidebar\.session\.row\.hover"/.test(source)
+	&& /id: "subagent-digest",/.test(source) && /order: 5,/.test(source), true);
+check("the seat's occupant is handed the store subscription and the translator",
+	/h\(SessionRowHover, \{ \.\.\.props, useHoverStores, t \}\)/.test(source), true);
+check("the card subscribes to the two stores it reads, and nothing else",
+	/scope\.sessions\.list\.subscribe\(update\)/.test(source)
+	&& /scope\.uiSession\.sessionStatus\.subscribe\(update\)/.test(source)
+	&& /const stops = \[/.test(source), true);
+check("the card asks the host for nothing and reads no log",
+	/[^a-zA-Z]fetch\(/.test(hoverSource) === false && /readSession/.test(hoverSource) === false
+	&& /MODELS_ROUTE/.test(hoverSource) === false, true);
+check("the card's numbers are the strip's numbers, session included",
+	/catalogTotals\(catalog, undefined, stores\.projections, stores\.summaries, stores\.statuses, now, sessionId\)/.test(hoverSource), true);
+check("a row with no subagents reports the session's own usage instead",
+	/if \(totals\.count === 0\) \{/.test(hoverSource)
+	&& /selfSummary\?\.projectionValues\?\.sessionStats/.test(hoverSource)
+	&& /t\("hover\.selfTokens", \{ value: formatTokens\(selfTokens, t\) \}\)/.test(hoverSource)
+	&& /t\("hover\.workTime", \{ duration: formatDuration\(work\.ms, t\) \}\)/.test(hoverSource)
+	&& /title: t\("hover\.workTitle", \{[\s\S]{0,240}?turns: work\.turns,\n\t+steps: work\.steps/.test(hoverSource), true);
+check("a session with nothing recorded stays silent rather than reporting zeros",
+	/\(selfTokens === undefined \|\| selfTokens === 0\) && cacheHit === null && \(work === null \|\| work\.ms === 0\)\) return null;/.test(hoverSource)
+	&& /work === null \|\| work\.ms === 0 \? null/.test(hoverSource)
+	&& /selfTokens === undefined \|\| selfTokens === 0 \? null/.test(hoverSource), true);
+check("the card lists a few rows and counts the rest",
+	/const HOVER_ROWS = 4;/.test(source) && /listed\.slice\(0, HOVER_ROWS\)/.test(hoverSource)
+	&& /t\("hover\.more", \{ count: hidden \}\)/.test(hoverSource), true);
+check("the card follows the same order switch as the catalog",
+	/settings\.newestFirst \? sortNewestFirst\(entries\) : entries/.test(hoverSource), true);
+check("the card says a row's state the way the catalog does",
+	/h\(StateDot, \{ state: activity === "running" \? "ongoing" : completed \? "done" : "idle", size: 12 \}\)/.test(hoverSource), true);
+check("the card's totals name the session's own share like the strip",
+	/title: t\("totals\.selfTitle", \{[\s\S]{0,200}?totals\.self\.cacheWrite\)/.test(hoverSource)
+	&& /t\("totals\.tokensWithSelf", \{\n\t+value: formatTokens\(totals\.tokens, t\),\n\t+self: formatTokens\(totals\.self\.tokens, t\)/.test(hoverSource), true);
+check("a row's share is explained on hover and never invented",
+	/t\("cache\.percent", \{ percent: hit \}\)/.test(hoverSource)
+	&& /hit === null \? null : h\("span", \{\n\t+className: "smgm-digestNote",/.test(hoverSource), true);
+check("the hover card stylesheet ships with the client half",
+	["smgm-digest", "smgm-digestLine", "smgm-digestRows", "smgm-digestRow", "smgm-digestName",
+		"smgm-digestValue", "smgm-digestNote"].every((name) => source.includes("." + name + "{")), true);
+check("the card wears the colours the sidebar card already uses",
+	/\.smgm-digest\{[^}]*color:#adb2b8/.test(source) && /\.smgm-digestName\{[^}]*color:#cfd3d6/.test(source), true);
+check("the header states the hover card as well",
+	/5\. The same digest, smaller, fills a sidebar Session row's hover card/.test(source), true);
+check("the header states the instant hover card too",
+	/6\. Those cards open without the shipped 800ms dwell/.test(source), true);
+check("the instant hover card is installed once, from this bundle's own factory",
+	/const INSTANT_HOVER_OPEN_MS = 0;/.test(source)
+	&& /const INSTANT_HOVER_MARK = Symbol\.for\("dsh-subagent-mgm\.instantHoverTimer"\);/.test(source)
+	&& /installInstantHover\(typeof window === "undefined" \? null : window, INSTANT_HOVER_OPEN_MS\)/.test(source), true);
+check("the instant hover card writes to no export, only to the live timer",
+	/primitives\.HoverCard|installInstantHover\(require\(/.test(source), false);
+check("the install is disposable, so a reload can put the real timer back",
+	/ctx\.effect\(\(\) => \{\n\t+const installed = installInstantHover\(/.test(source)
+	&& /return \(\) => uninstallInstantHover\(window, installed\);/.test(source), true);
+
+// ---------------------------------------------- session work + the instant hover
+//
+// Two small pieces run directly here: the `sessionStats` fold that gives a
+// childless Session its working time, and the wrappers that shorten the shipped
+// hover dwell and hand a card over to the next one. The primitives namespace is
+// frozen by the shell, so the wrappers take the global timers instead: a fake
+// window records what each `setTimeout` was handed and can fire one on demand.
+
+const hoverOpenConst = /const HOVER_OPEN_CALLBACK = [^\n]+;/.exec(source);
+if (hoverOpenConst === null) throw new Error("constant HOVER_OPEN_CALLBACK is missing from client.js");
+const hoverGraceConst = /const POINTER_GRACE_CALLBACK = [^\n]+;/.exec(source);
+if (hoverGraceConst === null) throw new Error("constant POINTER_GRACE_CALLBACK is missing from client.js");
+const hoverApi = new Function(
+	"INSTANT_HOVER_MARK",
+	extract("sessionWork") + "\n" + hoverOpenConst[0] + "\n" + hoverGraceConst[0] + "\n" +
+	extract("installInstantHover") + "\n" + extract("uninstallInstantHover") + "\n" +
+	"return { sessionWork, installInstantHover, uninstallInstantHover };"
+)(Symbol.for("dsh-subagent-mgm.instantHoverTimer"));
+const hoverCalls = [];
+const hoverLive = new Map();
+let hoverSeq = 0;
+let hoverThis = null;
+const fakeWindow = {
+	setTimeout: function (callback, delay, ...rest) {
+		hoverThis = this;
+		hoverCalls.push([callback, delay, rest]);
+		hoverSeq += 1;
+		hoverLive.set(hoverSeq, { callback, rest });
+		return hoverSeq;
+	},
+	clearTimeout: function (id) {
+		hoverLive.delete(id);
+	}
+};
+const realHoverTimer = fakeWindow.setTimeout;
+const realHoverClear = fakeWindow.clearTimeout;
+/** Fire one armed timer the way the browser would; false once it is gone. */
+function fireHoverTimer(id) {
+	const timer = hoverLive.get(id);
+	if (timer === undefined) return false;
+	hoverLive.delete(id);
+	timer.callback(...timer.rest);
+	return true;
+}
+const hoverInstalled = hoverApi.installInstantHover(fakeWindow, 0);
+check("the wrappers replace both live timers and report what they replaced",
+	[hoverInstalled !== null, hoverInstalled.real === realHoverTimer, hoverInstalled.realClear === realHoverClear,
+		fakeWindow.setTimeout === hoverInstalled.wrapped, fakeWindow.clearTimeout === hoverInstalled.wrappedClear,
+		fakeWindow.setTimeout[Symbol.for("dsh-subagent-mgm.instantHoverTimer")] === true,
+		fakeWindow.clearTimeout[Symbol.for("dsh-subagent-mgm.instantHoverTimer")] === true].join("|"),
+	"true|true|true|true|true|true|true");
+const openDwell = () => { setPhase("open"); };
+fakeWindow.setTimeout(openDwell, 800);
+check("the shipped opening dwell fires at once", [hoverCalls[0][1], hoverThis === fakeWindow].join("|"), "0|true");
+const minifiedDwell = () => { D("open"); };
+const spacedDwell = () => { setPhase( "open" ); };
+const memberDwell = function () { this.setPhase("open"); };
+fakeWindow.setTimeout(minifiedDwell, 500);
+fakeWindow.setTimeout(spacedDwell, 1200);
+fakeWindow.setTimeout(memberDwell, 800);
+check("a minified or respaced dwell callback is still recognised",
+	hoverCalls.slice(1, 4).map((call) => call[1]).join("|"), "0|0|0");
+fakeWindow.setTimeout(() => { setPhase("closed"); }, 800);
+fakeWindow.setTimeout(() => { show(); }, 800);
+fakeWindow.setTimeout(() => { setCopied(false); }, 400);
+fakeWindow.setTimeout("alert(1)", 800);
+fakeWindow.setTimeout(null, 800);
+fakeWindow.setTimeout(openDwell, 0);
+fakeWindow.setTimeout(openDwell, undefined);
+fakeWindow.setTimeout(openDwell, -5);
+fakeWindow.setTimeout(openDwell, "800");
+check("every other timer, and a dwell already shorter, is passed through untouched",
+	hoverCalls.slice(4).map((call) => String(call[1])).join("|"), "800|800|400|800|800|0|undefined|-5|800");
+fakeWindow.setTimeout(openDwell, 800, "arg", 7);
+check("a forced dwell still carries the caller's extra arguments",
+	[hoverCalls[13][1], hoverCalls[13][2].join(",")].join("|"), "0|arg,7");
+const replacedOrder = [];
+const replacedDwell = (...args) => { replacedOrder.push("open", ...args); };
+const replacedFired = fireHoverTimer(fakeWindow.setTimeout(replacedDwell, 800, "arg", 7));
+check("a forced dwell still runs the callback it replaced, with its arguments",
+	[String(replacedFired), replacedOrder.join(",")].join("|"), "true|open,arg,7");
+
+const closed = [];
+const graceStash = { current: null };
+const graceNext = { current: () => closed.push("close") };
+/** The shipped grace as the served bundle writes it, and as source would read it. */
+const bundledGrace = () => { graceStash.current=null,graceNext.current(); };
+const writtenGrace = () => { graceStash.current = null; graceNext.current(); };
+const openNext = () => closed.push("open");
+closed.length = 0;
+const replacedGrace = fakeWindow.setTimeout(writtenGrace, 200);
+const firstFired = fireHoverTimer(fakeWindow.setTimeout(openNext, 800));
+check("opening a card dismisses the card still waiting out its grace, and first",
+	[String(firstFired), closed.join(","), String(hoverLive.has(replacedGrace))].join("|"), "true|close,open|false");
+closed.length = 0;
+fakeWindow.clearTimeout(fakeWindow.setTimeout(bundledGrace, 200));
+fireHoverTimer(fakeWindow.setTimeout(openNext, 800));
+check("a grace the card itself cancelled is not run behind the user's back", closed.join(","), "open");
+closed.length = 0;
+fireHoverTimer(fakeWindow.setTimeout(writtenGrace, 200));
+fireHoverTimer(fakeWindow.setTimeout(openNext, 800));
+check("a grace that already elapsed is not run a second time", closed.join(","), "close,open");
+closed.length = 0;
+const shapeTimers = [
+	fakeWindow.setTimeout(bundledGrace, 200),
+	fakeWindow.setTimeout(writtenGrace, 200),
+	fakeWindow.setTimeout(function () { graceStash.current = null; graceNext(); }, 200),
+	fakeWindow.setTimeout(() => { setPhase("closed"); }, 100),
+	fakeWindow.setTimeout(writtenGrace, 0)
+];
+fireHoverTimer(fakeWindow.setTimeout(openNext, 800));
+check("the shipped grace shapes are taken over, its 200ms sibling is not",
+	[closed.join(","), shapeTimers.map((id) => String(hoverLive.has(id))).join(",")].join("|"),
+	"close,close,open|false,false,true,true,true");
+check("installing over an already wrapped timer stacks no second layer",
+	[String(hoverApi.installInstantHover(fakeWindow, 0)), fakeWindow.setTimeout === hoverInstalled.wrapped,
+		fakeWindow.clearTimeout === hoverInstalled.wrappedClear].join("|"), "null|true|true");
+const halfWindow = { setTimeout: realHoverTimer };
+const readOnlyWindow = {};
+Object.defineProperty(readOnlyWindow, "setTimeout", { value: realHoverTimer, writable: false });
+Object.defineProperty(readOnlyWindow, "clearTimeout", { value: realHoverClear, writable: false });
+const throwingWindow = new Proxy({}, {
+	get: (target, key) => (key === "setTimeout" ? realHoverTimer : key === "clearTimeout" ? realHoverClear : undefined),
+	set: () => { throw new Error("this window refuses the write"); }
+});
+check("a target that cannot take both wrappers, or has no timer, is left alone",
+	[String(hoverApi.installInstantHover(null, 0)), String(hoverApi.installInstantHover(undefined, 0)),
+		String(hoverApi.installInstantHover({}, 0)), String(hoverApi.installInstantHover({ setTimeout: "x" }, 0)),
+		String(hoverApi.installInstantHover(halfWindow, 0)), String(hoverApi.installInstantHover(readOnlyWindow, 0)),
+		String(hoverApi.installInstantHover(throwingWindow, 0)),
+		halfWindow.setTimeout === realHoverTimer, readOnlyWindow.setTimeout === realHoverTimer,
+		throwingWindow.setTimeout === realHoverTimer, throwingWindow.clearTimeout === realHoverClear].join("|"),
+	"null|null|null|null|null|null|null|true|true|true|true");
+const tidyWindow = { setTimeout: realHoverTimer, clearTimeout: realHoverClear };
+const tidyInstalled = hoverApi.installInstantHover(tidyWindow, 0);
+const foreignTimer = () => 0;
+const foreignClear = () => 0;
+tidyWindow.setTimeout = foreignTimer;
+tidyWindow.clearTimeout = foreignClear;
+hoverApi.uninstallInstantHover(tidyWindow, tidyInstalled);
+const restoreWindow = { setTimeout: realHoverTimer, clearTimeout: realHoverClear };
+hoverApi.uninstallInstantHover(restoreWindow, hoverApi.installInstantHover(restoreWindow, 0));
+check("the tidy-up puts both real timers back, but never a foreign later layer",
+	[tidyWindow.setTimeout === foreignTimer, tidyWindow.clearTimeout === foreignClear,
+		restoreWindow.setTimeout === realHoverTimer, restoreWindow.clearTimeout === realHoverClear,
+		String(hoverApi.uninstallInstantHover(null, restoreWindow)),
+		String(hoverApi.uninstallInstantHover(restoreWindow, null))].join("|"),
+	"true|true|true|true|undefined|undefined");
+const reloadWindow = { setTimeout: realHoverTimer, clearTimeout: realHoverClear };
+const firstInstall = hoverApi.installInstantHover(reloadWindow, 0);
+reloadWindow.setTimeout(writtenGrace, 200);
+hoverApi.uninstallInstantHover(reloadWindow, firstInstall);
+closed.length = 0;
+const reinstall = hoverApi.installInstantHover(reloadWindow, 0);
+const reloadFired = fireHoverTimer(reloadWindow.setTimeout(openNext, 800));
+check("a reinstall starts with no close left over from the install before it",
+	[reinstall !== null, String(reloadFired), closed.join(",")].join("|"), "true|true|open");
+check("the wrapper takes over the shipped close grace alone, never a fade or an export",
+	[/POINTER_GRACE_CALLBACK/.test(extract("installInstantHover")),
+		/previewFade|PREVIEW_FADE_MS|"closed"|closeDelay|primitives/.test(extract("installInstantHover"))].join("|"),
+	"true|false");
+check("the dwell it forces is a parameter, not the shipped 800ms baked in",
+	/800/.test(extract("installInstantHover")), false);
+check("session work folds model time and tool time into one duration",
+	JSON.stringify(hoverApi.sessionWork({ llmMs: 1200, toolMs: 300, turns: 4, steps: 9 })),
+	'{"ms":1500,"llmMs":1200,"toolMs":300,"turns":4,"steps":9}');
+check("session work reports nothing when the projection has nothing",
+	[String(hoverApi.sessionWork(undefined)), String(hoverApi.sessionWork(null)), String(hoverApi.sessionWork({})),
+		String(hoverApi.sessionWork({ llmMs: -5, toolMs: "x", turns: Number.NaN }))].join("|"), "null|null|null|null");
+check("session work keeps a session that only counted turns",
+	JSON.stringify(hoverApi.sessionWork({ turns: 2 })), '{"ms":0,"llmMs":0,"toolMs":0,"turns":2,"steps":0}');
 
 // ------------------------------------------------------------ host half (behaviour)
 //

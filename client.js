@@ -15,10 +15,21 @@
  *     loaded — tokens, the cache-hit share of prompt-side input, and wall time —
  *     in two lines so neither reflows the other. The session on screen is totalled
  *     with them and named beside the totals, since its own tokens are spent in the
- *     same place. The model behind those rows is
- *     read on demand from `/api/subagent-mgm/models`, because a model is named
- *     only in that subagent's own log. The share is taken over summed buckets,
- *     never averaged per row, so a tree total means what one log's share means.
+ *     same place. The model behind those rows is read on demand from
+ *     `/api/subagent-mgm/models`, because a model is named only in that subagent's
+ *     own log. The share is taken over summed buckets, never averaged per row, so a
+ *     tree total means what one log's share means.
+ *  5. The same digest, smaller, fills a sidebar Session row's hover card: that
+ *     row's subagent count, live tokens, cache share, wall time and up to four
+ *     rows, read from the two client stores alone — the card stays local,
+ *     read-only, and needs no log. A Session without subagents shows its own
+ *     usage line there instead of nothing.
+ *  6. Those cards open without the shipped 800ms dwell, and only one of them is
+ *     ever up: the global timers that arm the opening dwell and the 200ms close
+ *     grace are wrapped once at load — the primitives namespace the card is read
+ *     off is frozen by the shell, so its export cannot be. Crossing several rows
+ *     shows each card at once and takes down the one just left, while leaving a
+ *     row with nothing else opening still dismisses its card after the grace.
  *
  * A Settings page in the settings.section slot switches the ordering and the
  * automatic panels on and off. The switches are stored by this bundle's host half
@@ -56,6 +67,8 @@ window.__ModuleLoader__.load({
 		const FACE_ROUTE = "/api/subagent-mgm/face";
 		/** Same-origin route that returns the model behind a batch of session ids. */
 		const MODELS_ROUTE = "/api/subagent-mgm/models";
+		/** Subagent rows a sidebar hover card lists before it counts the rest. */
+		const HOVER_ROWS = 4;
 		/** Every switch the settings page owns, in page order. */
 		const SETTING_FIELDS = ["newestFirst", "autoOpen", "autoClose", "reveal"];
 		/** Effective switches before the first host reply: the original behaviour. */
@@ -91,6 +104,174 @@ window.__ModuleLoader__.load({
 			const [value, setValue] = useState(settingsStore.getSnapshot);
 			useEffect(() => settingsStore.subscribe(() => setValue(settingsStore.getSnapshot)), []);
 			return value;
+		}
+		/**
+		 * A clock that ticks once a second, for components that show a duration.
+		 * @returns the current timestamp, refreshed every second while mounted.
+		 */
+		function useNow() {
+			const [value, setValue] = useState(Date.now);
+			useEffect(() => {
+				const timer = setInterval(() => setValue(Date.now()), 1e3);
+				return () => clearInterval(timer);
+			}, []);
+			return value;
+		}
+		/**
+		 * The Session's own working wall time, as the host's `sessionStats`
+		 * projection folds it: model time (`llmMs`) plus tool time (`toolMs`). That is
+		 * the same kind of number a delegated row shows from its `subagentTiming`, so
+		 * a Session with no subagents can still answer "how long did this take" from
+		 * the client store alone, with no log read.
+		 * @param stats - the `sessionStats` projection, or undefined when it is absent.
+		 * @returns `{ ms, llmMs, toolMs, turns, steps }`, or null when it has nothing.
+		 */
+		function sessionWork(stats) {
+			if (stats === null || typeof stats !== "object") return null;
+			const count = (value) => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+			const llmMs = count(stats.llmMs);
+			const toolMs = count(stats.toolMs);
+			const turns = count(stats.turns);
+			const steps = count(stats.steps);
+			if (llmMs === 0 && toolMs === 0 && turns === 0 && steps === 0) return null;
+			return { ms: llmMs + toolMs, llmMs, toolMs, turns, steps };
+		}
+		/** Hover dwell this plugin leaves the shipped preview cards, in milliseconds. */
+		const INSTANT_HOVER_OPEN_MS = 0;
+		/** Marks both wrapped timers so a second install cannot stack another layer on them. */
+		const INSTANT_HOVER_MARK = Symbol.for("dsh-subagent-mgm.instantHoverTimer");
+		/**
+		 * The dwell timer's callback, matched by the call it makes: the shipped
+		 * `HoverCard` opens through `setTimeout(() => { setPhase("open"); }, openDelayMs)`.
+		 *
+		 * The timer, not the module export, is the place to intervene. The shell hands
+		 * every bundle one `@deepseek-ai/dsh-client-ui-primitives` namespace built with
+		 * `Object.freeze`, so writing a wrapper onto that namespace's `HoverCard` is a
+		 * silent no-op — the cards keep the delay the workspace asked for. Its `setTimeout`,
+		 * by contrast, is the global at call time, and the minifier keeps the string
+		 * the callback closes on, so the one timer this matches is the one that opens a
+		 * card. In the shipped client every other timer ends on something else
+		 * (`"closed"`, `show()`, `setCopied`, a fade or a focus move).
+		 */
+		const HOVER_OPEN_CALLBACK = /\(\s*["']open["']\s*\)/;
+		/**
+		 * The close grace's callback, matched the same way: the shipped `usePointerGrace`
+		 * waits out its 200ms through
+		 * `setTimeout(() => { timerRef.current = null; closeRef.current(); }, 200)`.
+		 *
+		 * Only property names reach this pattern — a minifier renames the refs, never
+		 * `.current` or the `null` written into it — so the shape is what identifies the
+		 * timer, not the delay. The sibling that clears a ref and then calls a plain
+		 * function (`setTimeout(() => { timerRef.current = null; show(); }, 200)`) does
+		 * not match, and neither does the fade. In the shipped shell this pattern matches
+		 * exactly one timer: the shared grace both the preview card and the dropdown menu
+		 * close through.
+		 */
+		const POINTER_GRACE_CALLBACK = /\.current\s*=\s*null\s*[,;]\s*[A-Za-z_$][\w$]*\.current\s*\(/;
+		/**
+		 * Open the shipped preview cards without their dwell, and take down the card the
+		 * pointer just left the moment a new one opens.
+		 *
+		 * The sidebar's Session and workspace rows ask for 800ms of dwell
+		 * (`dsh-client-ui-workspace` passes `openDelayMs: 800`), which is long enough to
+		 * feel broken when this plugin's digest is the reason to hover a Session row at
+		 * all. Wrapping `setTimeout` breaks no export and edits no package file, so the
+		 * change survives reinstalling DSH.
+		 *
+		 * Sweeping the pointer down a list of rows shows every crossed card at once,
+		 * stacked over the ones still waiting out their close grace, so the forced dwell
+		 * is paired with a hand-off: the close grace is the one other timer this wrapper
+		 * tracks, and opening a card runs any grace still pending in place of its own
+		 * timer. A card the pointer simply left alone keeps its shipped delay — only a
+		 * card that something replaces disappears at once.
+		 * @param target - the object carrying the live timers (the window).
+		 * @param delayMs - the opening dwell to force.
+		 * @returns the installed handles once both wrappers are in place, else null.
+		 */
+		function installInstantHover(target, delayMs) {
+			if (target === null || typeof target !== "object") return null;
+			const real = target.setTimeout;
+			const realClear = target.clearTimeout;
+			// A grace that could not be taken out of the queue would run twice, so both
+			// halves have to be wrappable before either one is installed.
+			if (typeof real !== "function" || typeof realClear !== "function" || real[INSTANT_HOVER_MARK] === true) return null;
+			/** Close graces waiting out their delay, by timer id. */
+			const pending = new Map();
+			/**
+			 * Run every close still waiting out its grace now, in place of its own timer:
+			 * when a card opens, one of these belongs to the card the pointer just left.
+			 */
+			const flushPendingCloses = () => {
+				const entries = [...pending.values()];
+				pending.clear();
+				for (const entry of entries) {
+					realClear.call(target, entry.id);
+					try {
+						entry.callback(...entry.args);
+					} catch (error) {
+						console.warn("[subagent-mgm] a hover card could not be dismissed early", error);
+					}
+				}
+			};
+			const wrapped = function (callback, delay, ...rest) {
+				if (typeof delay !== "number" || typeof callback !== "function") return real.call(this, callback, delay, ...rest);
+				if (delay > delayMs && HOVER_OPEN_CALLBACK.test(String(callback))) {
+					return real.call(this, (...args) => {
+						flushPendingCloses();
+						return callback(...args);
+					}, delayMs, ...rest);
+				}
+				if (delay <= 0 || !POINTER_GRACE_CALLBACK.test(String(callback))) return real.call(this, callback, delay, ...rest);
+				let id = 0;
+				const once = (...args) => {
+					pending.delete(id);
+					return callback(...args);
+				};
+				id = real.call(this, once, delay, ...rest);
+				pending.set(id, { id, callback, args: rest });
+				return id;
+			};
+			wrapped[INSTANT_HOVER_MARK] = true;
+			const wrappedClear = function (id, ...rest) {
+				pending.delete(id);
+				return realClear.call(this, id, ...rest);
+			};
+			wrappedClear[INSTANT_HOVER_MARK] = true;
+			try {
+				target.setTimeout = wrapped;
+				target.clearTimeout = wrappedClear;
+			} catch (error) {
+				// A global that refuses the write is not worth breaking the plugin over; put
+				// back whichever half did take before reporting the failure.
+				try {
+					target.setTimeout = real;
+					target.clearTimeout = realClear;
+				} catch (ignored) {
+					// The refused write is the one that threw; there is nothing to put back.
+				}
+				return null;
+			}
+			// A sloppy-mode write onto a read-only property fails silently instead; either
+			// way report only what actually took.
+			if (target.setTimeout !== wrapped || target.clearTimeout !== wrappedClear) {
+				target.setTimeout = real;
+				target.clearTimeout = realClear;
+				return null;
+			}
+			return { real, wrapped, realClear, wrappedClear };
+		}
+		/**
+		 * Put the real timers back, but only while ours are still the live ones: a later
+		 * install (or a reload that re-applies this plugin) may have wrapped them again,
+		 * and that outer layer must survive this tidy-up. A grace still pending is left to
+		 * its own timer, exactly the way it was armed.
+		 * @param target - the object the wrappers were installed on.
+		 * @param installed - what `installInstantHover` returned.
+		 */
+		function uninstallInstantHover(target, installed) {
+			if (target === null || typeof target !== "object" || installed === null || typeof installed !== "object") return;
+			if (target.setTimeout === installed.wrapped) target.setTimeout = installed.real;
+			if (target.clearTimeout === installed.wrappedClear) target.clearTimeout = installed.realClear;
 		}
 
 		/** Ported from the shipped catalog stylesheet; classes renamed under `smgm-`. */
@@ -232,6 +413,16 @@ window.__ModuleLoader__.load({
 .smgm-modelError{font-size:10.5px;line-height:15px;color:var(--dsw-alias-state-error-primary)}
 .smgm-filterEmpty{padding:12px 10px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary);text-align:center}
 .smgm-tree>.smgm-node{margin-left:-2px}
+/* The sidebar hover card is styled by the workspace with literal dark-surface
+   colours (.hoverTitle #fff, .hoverTime #cfd3d6, .hoverStatus #adb2b8), so this
+   section matches those instead of the theme tokens used elsewhere. */
+.smgm-digest{flex-direction:column;gap:5px;color:#adb2b8;font-size:12px;line-height:18px;display:flex}
+.smgm-digestLine{align-items:center;gap:8px;flex-wrap:wrap;display:flex}
+.smgm-digestRows{flex-direction:column;gap:3px;display:flex}
+.smgm-digestRow{align-items:center;gap:6px;min-width:0;display:flex}
+.smgm-digestName{flex:1 1 auto;min-width:0;color:#cfd3d6;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
+.smgm-digestValue{color:#cfd3d6;flex:none;font-variant-numeric:tabular-nums}
+.smgm-digestNote{color:#8c9299;flex:none;font-size:11px}
 `;
 
 		/** Simplified Chinese dictionary (key-set source of truth). */
@@ -371,7 +562,11 @@ window.__ModuleLoader__.load({
 			"models.unknown": "未知模型",
 			"models.unknownNote": "日志里没有模型信息，或该会话的日志没能读到。",
 			"models.delegated": "委派指定的模型",
-			"models.times": "× {count}"
+			"models.times": "× {count}",
+			"hover.more": "另有 {count} 个未列出",
+			"hover.selfTokens": "本会话 {value}",
+			"hover.workTime": "总用时 {duration}",
+			"hover.workTitle": "模型 {model} · 工具 {tool} · {turns} 轮 · {steps} 步"
 		};
 		/** English dictionary, key-identical to the Chinese source of truth. */
 		const en = {
@@ -510,7 +705,11 @@ window.__ModuleLoader__.load({
 			"models.unknown": "Unknown model",
 			"models.unknownNote": "The log holds no model, or that session's log could not be read.",
 			"models.delegated": "Model named by the delegation",
-			"models.times": "× {count}"
+			"models.times": "× {count}",
+			"hover.more": "{count} more not listed",
+			"hover.selfTokens": "{value} here",
+			"hover.workTime": "worked for {duration}",
+			"hover.workTitle": "model {model} · tools {tool} · {turns} turns · {steps} steps"
 		};
 
 		//#region shared helpers
@@ -1958,6 +2157,143 @@ window.__ModuleLoader__.load({
 			return h(CatalogDropdown, identity);
 		}
 		/**
+		 * Sidebar session-row hover digest: the subagents of one Session, inside the
+		 * card the sidebar already opens for that row.
+		 *
+		 * The workspace renders this seat between the row's relative time and the
+		 * shipped "N subagents running" line, and that line belongs to the workspace,
+		 * so this adds what the line leaves out instead of replacing it. The seat
+		 * hands over the row's Session id alone, so the two client stores are
+		 * subscribed here: nothing is retained, no session log is read (a model name
+		 * lives only in a log, so the model grouping stays in the panel), and the
+		 * numbers are the ones the catalog strip would show for that Session with no
+		 * filter — its own usage included, because it is spent in the same place.
+		 * The rows are deliberately not clickable: the card itself copies the Session
+		 * title on click, and a second action inside the same card would be a coin
+		 * toss.
+		 *
+		 * A Session with no subagents is not skipped: it shows its own line — tokens
+		 * spent, cache share, working time from the host's `sessionStats` projection —
+		 * because that is the same question the rows answer one level down.
+		 * @param props.sessionId - the Session this row shows.
+		 * @param props.useHoverStores - injected subscription to the client stores.
+		 * @param props.t - translate function.
+		 * @returns the digest, the Session's own usage line when it has no subagents,
+		 *   or null when there is nothing to report.
+		 */
+		function SessionRowHover({ sessionId, useHoverStores, t }) {
+			const stores = useHoverStores();
+			const now = useNow();
+			const settings = useSettings();
+			const catalog = catalogOf(sessionId, stores.projections, stores.summaries);
+			const totals = catalogTotals(catalog, undefined, stores.projections, stores.summaries, stores.statuses, now, sessionId);
+			const selfSummary = stores.summaries[sessionId];
+			const selfTokens = totals.self === null ? undefined : totals.self.tokens;
+			const cacheHit = cacheHitPercent(totals.cacheRead, totals.billedInput);
+			const work = sessionWork(selfSummary?.projectionValues?.sessionStats);
+			// No subagents on this row: the shipped status line keeps saying what it
+			// says, and this card answers instead the question the rows would have
+			// answered — what this Session spent and how long it worked. A Session with
+			// nothing recorded yet stays silent rather than reporting zeros.
+			if (totals.count === 0) {
+				if ((selfTokens === undefined || selfTokens === 0) && cacheHit === null && (work === null || work.ms === 0)) return null;
+				return h("div", { className: "smgm-digest" },
+					h("div", { className: "smgm-digestLine" },
+						selfTokens === undefined || selfTokens === 0 ? null : h("span", {
+							className: "smgm-digestValue",
+							title: t("totals.selfTitle", {
+								hit: formatExactTokens(totals.cacheRead),
+								written: formatExactTokens(totals.cacheWrite),
+								prompt: formatExactTokens(totals.billedInput),
+								missed: formatExactTokens(Math.max(0, totals.billedInput - totals.cacheRead))
+							})
+						}, t("hover.selfTokens", { value: formatTokens(selfTokens, t) })),
+						cacheHit === null ? null : h("span", {
+							className: "smgm-digestValue",
+							title: t("cache.stripTitle", {
+								hit: formatExactTokens(totals.cacheRead),
+								written: formatExactTokens(totals.cacheWrite),
+								prompt: formatExactTokens(totals.billedInput),
+								missed: formatExactTokens(Math.max(0, totals.billedInput - totals.cacheRead))
+							})
+						}, t("cache.percent", { percent: cacheHit })),
+						work === null || work.ms === 0 ? null : h("span", {
+							className: "smgm-digestValue",
+							title: t("hover.workTitle", {
+								model: formatExactDuration(work.llmMs, t),
+								tool: formatExactDuration(work.toolMs, t),
+								turns: work.turns,
+								steps: work.steps
+							})
+						}, t("hover.workTime", { duration: formatDuration(work.ms, t) }))));
+			}
+			const entries = catalog?.entries ?? [];
+			const ordered = settings.newestFirst ? sortNewestFirst(entries) : entries;
+			const listed = ordered.filter((entry) => entry !== null && typeof entry === "object" && typeof entry.id === "string");
+			const shown = listed.slice(0, HOVER_ROWS);
+			const hidden = totals.count - shown.length;
+			const totalsItem = totals.self === null
+				? h("span", { className: "smgm-digestValue" }, t("totals.tokens", { value: formatTokens(totals.tokens, t) }))
+				: h("span", {
+					className: "smgm-digestValue",
+					title: t("totals.selfTitle", {
+						hit: formatExactTokens(totals.self.cacheRead),
+						written: formatExactTokens(totals.self.cacheWrite),
+						prompt: formatExactTokens(totals.self.billedInput),
+						missed: formatExactTokens(Math.max(0, totals.self.billedInput - totals.self.cacheRead))
+					})
+				}, t("totals.tokensWithSelf", {
+					value: formatTokens(totals.tokens, t),
+					self: formatTokens(totals.self.tokens, t)
+				}));
+			return h("div", { className: "smgm-digest" },
+				h("div", { className: "smgm-digestLine" },
+					h("span", null, t("count.total.other", { count: totals.count })),
+					totals.running === 0 ? null : h("span", null, t("totals.running", { count: totals.running })),
+					totals.unknownTokens === 0 ? null
+						: h("span", { className: "smgm-digestNote" }, t("totals.partial", { count: totals.unknownTokens }))),
+				h("div", { className: "smgm-digestLine" },
+					totalsItem,
+					cacheHit === null ? null : h("span", {
+						className: "smgm-digestValue",
+						title: t("cache.stripTitle", {
+							hit: formatExactTokens(totals.cacheRead),
+							written: formatExactTokens(totals.cacheWrite),
+							prompt: formatExactTokens(totals.billedInput),
+							missed: formatExactTokens(Math.max(0, totals.billedInput - totals.cacheRead))
+						})
+					}, t("cache.percent", { percent: cacheHit })),
+					totals.durationMs === 0 ? null : h("span", {
+						className: "smgm-digestValue",
+						title: formatExactDuration(totals.durationMs, t)
+					}, t("totals.duration", { duration: formatDuration(totals.durationMs, t) }))),
+				h("div", { className: "smgm-digestRows" }, shown.map((entry) => {
+					const summary = stores.summaries[entry.id];
+					const activity = activityOf(entry.id, stores.summaries, stores.statuses);
+					const completed = activity === "inactive" && summary?.projectionValues?.subagentTiming?.lastTurnCompleted === true;
+					const usageValue = summary?.projectionValues?.tokenUsage;
+					const totalTokens = tokenTotal(usageValue);
+					const read = usageValue?.cacheReadTokens ?? 0;
+					const billed = billedInputTokens(usageValue) ?? 0;
+					const hit = cacheHitPercent(usageValue?.cacheReadTokens, billedInputTokens(usageValue));
+					const label = entry.label ?? entry.id;
+					return h("div", { className: "smgm-digestRow", key: entry.id },
+						h(StateDot, { state: activity === "running" ? "ongoing" : completed ? "done" : "idle", size: 12 }),
+						h("span", { className: "smgm-digestName", title: label }, label),
+						totalTokens === undefined ? null
+							: h("span", { className: "smgm-digestValue" }, t("tokens.total", { value: formatTokens(totalTokens, t) })),
+						hit === null ? null : h("span", {
+							className: "smgm-digestNote",
+							title: t("cache.exactTitle", {
+								hit: formatExactTokens(read),
+								prompt: formatExactTokens(billed),
+								missed: formatExactTokens(Math.max(0, billed - read))
+							})
+						}, t("cache.percent", { percent: hit })));
+				})),
+				hidden <= 0 ? null : h("div", { className: "smgm-digestNote" }, t("hover.more", { count: hidden })));
+		}
+		/**
 		 * Header lineage: the breadcrumb a child session shows instead of the
 		 * count action, newest-first like the catalog it replaces.
 		 *
@@ -2428,6 +2764,20 @@ window.__ModuleLoader__.load({
 			ctx.effect(() => insertStyles(), "subagent-mgm: styles");
 			ctx.effect(() => ctx.locale.register(NS, { zh, en }), "subagent-mgm: dictionaries");
 			const t = ctx.locale.bind(NS);
+			// The sidebar's hover cards wait 800ms of dwell before they open, and this
+			// plugin's digest is the reason to hover a Session row at all, so the timer
+			// that opens them and the grace that lets the previous card linger are both
+			// wrapped once here. A failure is not worth breaking the plugin over: the
+			// cards keep their shipped delay.
+			ctx.effect(() => {
+				const installed = installInstantHover(typeof window === "undefined" ? null : window, INSTANT_HOVER_OPEN_MS);
+				if (installed === null) {
+					console.warn("[subagent-mgm] the hover card delay and hand-off are unchanged");
+					return () => {};
+				}
+				console.warn("[subagent-mgm] hover cards open at once and take turns");
+				return () => uninstallInstantHover(window, installed);
+			}, "subagent-mgm: instant hover cards");
 			const catalogActions = (_parentSessionId) => ({
 				openChild(address) {
 					ctx.uiWorkspace.openSession(address);
@@ -2477,6 +2827,37 @@ window.__ModuleLoader__.load({
 			);
 			ctx.inject(["uiSession", "sidebarRight"], (scope) => {
 				scope.effect(() => startSubagentPanels(scope), "subagent-mgm: automatic subagent panels");
+			});
+			// The sidebar row's hover seat hands over that row's Session id alone, so
+			// the digest subscribes to the two client stores itself — from a scope that
+			// has the session-status service, the same one the catalog strip reads, so
+			// the two agree on what is running.
+			ctx.inject(["uiSession"], (scope) => {
+				const readStores = () => ({
+					projections: scope.sessions.list.getSnapshot().projectionsBySession,
+					summaries: scope.sessions.list.getSnapshot().byId,
+					statuses: scope.uiSession?.sessionStatus?.getSnapshot()
+				});
+				const useHoverStores = () => {
+					const [snapshot, setSnapshot] = useState(readStores);
+					useEffect(() => {
+						const update = () => setSnapshot(readStores());
+						const stops = [scope.sessions.list.subscribe(update)];
+						if (scope.uiSession?.sessionStatus !== undefined) stops.push(scope.uiSession.sessionStatus.subscribe(update));
+						return () => {
+							for (const stop of stops) stop();
+						};
+					}, []);
+					return snapshot;
+				};
+				ctx.slots.inject("sidebar.session.row.hover", () => ctx.slots.register({
+					name: "sidebar.session.row.hover",
+					id: "subagent-digest",
+					// Ahead of the schedule occupant (order 10): this section is the
+					// shortest of the two and belongs directly under the card's time line.
+					order: 5,
+					locale: NS
+				}, (props) => h(SessionRowHover, { ...props, useHoverStores, t })));
 			});
 		}
 		exports.apply = apply;
