@@ -527,6 +527,7 @@ window.__ModuleLoader__.load({
 			"face.skills.unavailable": "宿主没有挂载技能注册表，无法列出技能。",
 			"face.skills.failed": "技能列表读取失败：{error}",
 			"face.skills.agentOnly": "仅智能体可调用",
+			"face.skills.notDelegated": "这次委派的工具面里没有 skill，所以它看不到任何技能。技能目录只发给手里有 skill 工具的智能体。",
 			"face.persona.recorded": "委派记录（权威）",
 			"face.persona.inferred": "由系统提示差异推断",
 			"face.persona.generated": "按运行模型生成",
@@ -670,6 +671,7 @@ window.__ModuleLoader__.load({
 			"face.skills.unavailable": "The host has no skill registry mounted, so skills cannot be listed.",
 			"face.skills.failed": "Could not list skills: {error}",
 			"face.skills.agentOnly": "agent-only",
+			"face.skills.notDelegated": "This delegation's tool face has no skill, so the subagent sees no skills at all. The catalogue is published only to an agent holding the skill tool.",
 			"face.persona.recorded": "Delegation record (authoritative)",
 			"face.persona.inferred": "Inferred from the system-prompt difference",
 			"face.persona.generated": "Filled in from the run model",
@@ -1691,6 +1693,16 @@ window.__ModuleLoader__.load({
 			const skillEntries = Array.isArray(skills.entries) ? skills.entries : [];
 			const persona = value.persona ?? null;
 			const filter = subagent.toolFilter ?? null;
+			// The catalogue rendered below is published only to an agent that
+			// holds the `skill` tool, and a delegation can leave that tool out of
+			// the face (an allow list without it, a deny list with it, or simply
+			// a face that never had it). The session catalogue is therefore no
+			// proof that THIS subagent sees any skill, so keep the two halves of
+			// the panel consistent: no `skill` tool in the face, no skill list.
+			const deniedSkill = Array.isArray(filter?.deny) && filter.deny.includes("skill");
+			const allowLacksSkill = Array.isArray(filter?.allow) && filter.allow.length > 0 && !filter.allow.includes("skill");
+			const runLacksSkill = tools.length > 0 && !tools.some((tool) => tool.name === "skill");
+			const skillHidden = deniedSkill || allowLacksSkill || runLacksSkill;
 			const model = [run.provider, run.model].filter(Boolean).join(" / ");
 			const delegatedModel = [subagent.agentModel, subagent.agentReasoningEffort].filter(Boolean).join(" / ");
 			const filterText = filter === null
@@ -1728,19 +1740,21 @@ window.__ModuleLoader__.load({
 								h("summary", { className: "smgm-faceItemFlag" }, t("face.tools.params")),
 								h("pre", { className: "smgm-faceParams" }, faceJson(tool.parameters)))))));
 			const skillSection = section(t("face.section.skills"),
-				skills.state === "ok" ? h("span", { className: "smgm-faceCount" }, t("face.skills.count", { count: skillEntries.length })) : null,
-				skills.state === "unavailable"
-					? h("div", { className: "smgm-faceEmpty" }, t("face.skills.unavailable"))
-					: skills.state === "error"
-						? h("div", { className: "smgm-faceEmpty" }, t("face.skills.failed", { error: skills.error ?? "" }))
-						: skillEntries.length === 0
-							? h("div", { className: "smgm-faceEmpty" }, t("face.skills.empty"))
-							: skillEntries.map((entry) => h("div", { className: "smgm-faceItem", key: entry.name },
-								h("span", { className: "smgm-faceItemName" },
-									entry.name,
-									entry.modelInvocable === true ? null : h("span", { className: "smgm-faceItemFlag" }, ` · ${t("face.skills.agentOnly")}`)),
-								entry.description === undefined || entry.description === "" ? null : h("span", { className: "smgm-faceItemDesc" }, entry.description),
-								entry.whenToUse === undefined || entry.whenToUse === "" ? null : h("span", { className: "smgm-faceItemDesc" }, entry.whenToUse))));
+				skillHidden || skills.state !== "ok" ? null : h("span", { className: "smgm-faceCount" }, t("face.skills.count", { count: skillEntries.length })),
+				skillHidden
+					? h("div", { className: "smgm-faceEmpty" }, t("face.skills.notDelegated"))
+					: skills.state === "unavailable"
+						? h("div", { className: "smgm-faceEmpty" }, t("face.skills.unavailable"))
+						: skills.state === "error"
+							? h("div", { className: "smgm-faceEmpty" }, t("face.skills.failed", { error: skills.error ?? "" }))
+							: skillEntries.length === 0
+								? h("div", { className: "smgm-faceEmpty" }, t("face.skills.empty"))
+								: skillEntries.map((entry) => h("div", { className: "smgm-faceItem", key: entry.name },
+									h("span", { className: "smgm-faceItemName" },
+										entry.name,
+										entry.modelInvocable === true ? null : h("span", { className: "smgm-faceItemFlag" }, ` · ${t("face.skills.agentOnly")}`)),
+									entry.description === undefined || entry.description === "" ? null : h("span", { className: "smgm-faceItemDesc" }, entry.description),
+									entry.whenToUse === undefined || entry.whenToUse === "" ? null : h("span", { className: "smgm-faceItemDesc" }, entry.whenToUse))));
 			const personaLabel = persona?.source === "descriptor"
 				? "face.persona.recorded"
 				: persona?.generated === true ? "face.persona.generated" : "face.persona.inferred";

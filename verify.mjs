@@ -576,7 +576,7 @@ check("both dictionaries translate the face", [
 	"face.cwd", "face.depth", "face.created", "face.parent", "face.filter", "face.filter.allow",
 	"face.filter.deny", "face.tools.count", "face.tools.source", "face.tools.empty", "face.tools.params",
 	"face.tools.deferred", "face.skills.count", "face.skills.empty", "face.skills.unavailable",
-	"face.skills.failed", "face.skills.agentOnly", "face.persona.recorded", "face.persona.inferred",
+	"face.skills.failed", "face.skills.agentOnly", "face.skills.notDelegated", "face.persona.recorded", "face.persona.inferred",
 	"face.persona.generated", "face.persona.generatedNote", "face.persona.replaced", "face.persona.empty"
 ].every((key) => (source.split(JSON.stringify(key) + ":").length - 1) === 2), true);
 check("both counts are filled in at render time",
@@ -594,6 +594,32 @@ check("the persona it replaced is shown beside it",
 	&& /t\("face\.persona\.replaced"\)/.test(faceSource), true);
 check("a skill that only a human invokes is flagged",
 	/entry\.modelInvocable === true \? null : h\("span", \{ className: "smgm-faceItemFlag" \}/.test(faceSource), true);
+check("a delegation that withholds the skill tool stops listing skills",
+	/const deniedSkill = Array\.isArray\(filter\?\.deny\) && filter\.deny\.includes\("skill"\);/.test(faceSource)
+	&& /const allowLacksSkill = Array\.isArray\(filter\?\.allow\) && filter\.allow\.length > 0 && !filter\.allow\.includes\("skill"\);/.test(faceSource)
+	&& /const runLacksSkill = tools\.length > 0 && !tools\.some\(\(tool\) => tool\.name === "skill"\);/.test(faceSource)
+	&& /const skillHidden = deniedSkill \|\| allowLacksSkill \|\| runLacksSkill;/.test(faceSource), true);
+check("a withheld skill face says so instead of counting them",
+	/skillHidden \|\| skills\.state !== "ok" \? null : h\("span", \{ className: "smgm-faceCount" \}, t\("face\.skills\.count"/.test(faceSource)
+	&& /skillHidden\n\t+\? h\("div", \{ className: "smgm-faceEmpty" \}, t\("face\.skills\.notDelegated"\)\)/.test(faceSource), true);
+// Drive the real predicate lines lifted out of the client, not a rewrite of them:
+// the three signals are an allow list without `skill`, a deny list with it, and a
+// recorded tool face that lacks it. A face with no recorded tool at all proves
+// nothing, so it must stay silent rather than claim the subagent saw no skill.
+const skillFaceSource = (source.match(/const deniedSkill[\s\S]*?const skillHidden = deniedSkill \|\| allowLacksSkill \|\| runLacksSkill;/) ?? [])[0];
+const skillFace = skillFaceSource === undefined
+	? () => undefined
+	: new Function("filter", "tools", `${skillFaceSource}\nreturn skillHidden;`);
+check("the withheld-skill predicate is driven from the client's own lines",
+	[
+		["an allow list without skill", { allow: ["bash", "read"] }, [], true],
+		["a deny list naming skill", { deny: ["workflow", "skill"] }, [], true],
+		["a recorded face without skill", null, [{ name: "bash" }], true],
+		["an allow list that keeps skill", { allow: ["skill", "bash"] }, [], false],
+		["a deny list that spares skill", { deny: ["workflow"] }, [], false],
+		["a face with no recorded tool", null, [], false],
+		["a recorded face with skill", { deny: ["workflow"] }, [{ name: "skill" }], false]
+	].every(([, filter, tools, expected]) => skillFace(filter, tools) === expected), true);
 
 // -------------------------------------------------- totals and filter (static)
 //
