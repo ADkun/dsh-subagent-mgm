@@ -1,6 +1,6 @@
 # dsh-subagent-mgm bundle patch: inserts the plugin row into the profile roster.
 # The host half (exports ".") serves the Settings page route
-# /api/subagent-mgm/settings and stores the four switches in
+# /api/subagent-mgm/settings and stores the five switches in
 # <DSH_PROFILE_DIR|DSH_HOME|~/.dsh>/subagent-mgm.json; the `config` block below
 # is the per-field fallback used until that page writes the file.
 # The browser half (exports "./client", declared in package.json dsh.client)
@@ -14,3 +14,4 @@
         autoOpen: true
         autoClose: true
         reveal: true
+        failureReason: true

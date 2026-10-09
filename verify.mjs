@@ -33,7 +33,11 @@
  * 9. static wiring checks for the head above the tree, and for the model batch
  *    the client asks for on demand because a model lives only in a session log;
  * 10. the models route behaviourally: one read per named id, the batch cap, and
- *    an id whose own log is missing or unreadable answering for itself.
+ *    an id whose own log is missing or unreadable answering for itself;
+ * 11. the settlement diagnosis behaviourally: the real `agent/pre-step` listener
+ *    appends the child's own recorded stop reason to the notice it arrived in,
+ *    leaves an already-annotated notice alone, and says so plainly when the
+ *    child's log records no turn at all or is not in this profile.
  *
  * No DOM, no React and no browser are involved.
  */
@@ -471,7 +475,7 @@ const hostFields = /const FIELDS = \[([^\]]*)\]/.exec(host)[1].replace(/["\s]/g,
 
 check("both halves own the same switch list", clientFields, hostFields);
 check("the switches default to the shipped behaviour",
-	/const DEFAULT_SETTINGS = Object\.freeze\(\{ newestFirst: true, autoOpen: true, autoClose: true, reveal: true \}\);/.test(source), true);
+	/const DEFAULT_SETTINGS = Object\.freeze\(\{ newestFirst: true, autoOpen: true, autoClose: true, reveal: true, failureReason: true \}\);/.test(source), true);
 check("the switch store keeps only booleans",
 	/typeof payload\?\.\[field\] === "boolean"/.test(source), true);
 check("the panel keeper follows the switch store",
@@ -497,13 +501,14 @@ check("the page asks the host before showing values",
 check("a rejected save is shown, not swallowed",
 	/if \(!response\.ok\) throw new Error\(payload\?\.error \?\? "HTTP " \+ response\.status\);/.test(settingsSource), true);
 check("every switch is offered to the page",
-	["newestFirst", "autoOpen", "autoClose", "reveal"].every((field) => settingsSource.includes("[\"" + field + "\", \"settings." + field)), true);
+	["newestFirst", "autoOpen", "autoClose", "reveal", "failureReason"].every((field) => settingsSource.includes("[\"" + field + "\", \"settings." + field)), true);
 check("both dictionaries label every switch", [
 	"settings.nav", "settings.title", "settings.subtitle", "settings.behaviour",
 	"settings.newestFirst", "settings.newestFirstHint", "settings.autoOpen", "settings.autoOpenHint",
 	"settings.autoClose", "settings.autoCloseHint", "settings.reveal", "settings.revealHint",
 	"settings.current", "settings.short.newestFirst", "settings.short.autoOpen", "settings.short.autoClose",
-	"settings.short.reveal", "settings.sep", "settings.on", "settings.off", "settings.save", "settings.saving",
+	"settings.short.reveal", "settings.short.failureReason", "settings.failureReason", "settings.failureReasonHint",
+	"settings.sep", "settings.on", "settings.off", "settings.save", "settings.saving",
 	"settings.saved", "settings.reset", "settings.resetting", "settings.resetDone", "settings.storedAt",
 	"settings.notStored", "settings.loading", "settings.failed", "settings.rejected", "settings.retry", "settings.note"
 ].every((key) => (source.split(JSON.stringify(key) + ":").length - 1) === 2), true);
@@ -682,7 +687,7 @@ check("both dictionaries translate the filter, the totals and the hover card", [
 	"filter.oneShot", "filter.empty", "totals.loaded", "totals.running", "totals.tokens", "totals.duration",
 	"totals.none", "totals.partial", "totals.tokensWithSelf", "totals.selfTitle", "models.fetch", "models.refetch", "models.hint", "models.loading",
 	"models.failed", "models.empty", "models.unknown", "models.unknownNote", "models.delegated", "models.times",
-	"cache.percent", "cache.exactTitle", "cache.stripTitle", "tokens.exactTitle", "tokens.cacheTitle", "hover.more",
+	"cache.percent", "cache.rowPercent", "cache.exactTitle", "cache.stripTitle", "tokens.exactTitle", "tokens.cacheTitle", "hover.more",
 	"hover.selfTokens", "hover.workTime", "hover.workTitle"
 ].every((key) => (source.split(JSON.stringify(key) + ":").length - 1) === 2), true);
 check("the cache share has its own helper pair",
@@ -694,6 +699,16 @@ check("each model group carries its own share",
 	/cacheHitPercent\(group\.cacheRead, group\.billedInput\)/.test(totalsSource), true);
 check("a row's token metric explains its share on hover",
 	/t\("tokens\.cacheTitle", \{ value: formatExactTokens\(totalTokens\), percent: rowCacheHit \}\)/.test(source), true);
+check("a row states its own cache share on the row, not only in a tooltip",
+	/\.smgm-metricCache\{grid-row:3\}/.test(source)
+	&& /cacheMetric === undefined \? null : h\("span", \{\n\t+className: "smgm-metricCache"/.test(source)
+	&& /t\("cache\.rowPercent", \{ percent: rowCacheHit \}\)/.test(source)
+	&& /t\("cache\.exactTitle", \{\n\t+hit: formatExactTokens\(rowCacheRead\),\n\t+prompt: formatExactTokens\(rowBilledInput\),\n\t+missed: formatExactTokens\(Math\.max\(0, rowBilledInput - rowCacheRead\)\)/.test(source), true);
+check("a row shortens the label the strip spells out, in both dictionaries",
+	/"cache\.rowPercent": "缓存 \{percent\}%"/.test(source)
+	&& /"cache\.rowPercent": "Cache \{percent\}%"/.test(source)
+	&& /"cache\.percent": "缓存命中 \{percent\}%"/.test(source)
+	&& /"cache\.percent": "Cache hit \{percent\}%"/.test(source), true);
 check("counts and usage are separate lines, so neither reflows the other",
 	/className: "smgm-totals" \},\n\t+h\("span", \{ className: "smgm-totalsItem" \}, t\("totals\.loaded", \{ count: totals\.count \}\)\),\n\t+totals\.running === 0 \? null : h\("span", \{ className: "smgm-totalsItem" \}, t\("totals\.running"/.test(totalsSource)
 	&& /className: "smgm-totals" \},\n\t+totalsItem,\n\t+cacheItem,\n\t+h\("span", \{ className: "smgm-totalsItem", title: formatExactDuration/.test(totalsSource), true);
@@ -961,7 +976,7 @@ check("the card's totals name the session's own share like the strip",
 	/title: t\("totals\.selfTitle", \{[\s\S]{0,200}?totals\.self\.cacheWrite\)/.test(hoverSource)
 	&& /t\("totals\.tokensWithSelf", \{\n\t+value: formatTokens\(totals\.tokens, t\),\n\t+self: formatTokens\(totals\.self\.tokens, t\)/.test(hoverSource), true);
 check("a row's share is explained on hover and never invented",
-	/t\("cache\.percent", \{ percent: hit \}\)/.test(hoverSource)
+	/t\("cache\.rowPercent", \{ percent: hit \}\)/.test(hoverSource)
 	&& /hit === null \? null : h\("span", \{\n\t+className: "smgm-digestNote",/.test(hoverSource), true);
 check("the hover card stylesheet ships with the client half",
 	["smgm-digest", "smgm-digestLine", "smgm-digestRows", "smgm-digestRow", "smgm-digestName",
@@ -1170,10 +1185,20 @@ const routes = [];
  * Mount the host half on a fake context and remember the route it registered.
  * `services` stands in for the optional carrier services the face route reads.
  */
+/** One mount's pre-step listeners, parallel to `routes` by the same index. */
+const hooksByMount = [];
+
 function mountHost(config, services) {
+	const index = routes.length;
+	hooksByMount[index] = [];
 	applyHost({
 		inject: (_keys, callback) => callback({
 			effect: (operation) => operation(),
+			get: (name) => services?.[name],
+			on: (event, listener) => {
+				hooksByMount[index].push({ event, listener });
+				return () => {};
+			},
 			webServer: { register: (route) => { routes.push(route); return () => {}; } }
 		}),
 		get: (name) => services?.[name]
@@ -1229,7 +1254,8 @@ check("a fresh install answers", initial.status, 200);
 check("the answer is JSON", initial.headers["content-type"], "application/json; charset=utf-8");
 check("the answer is never cached", initial.headers["cache-control"], "no-store");
 check("every switch defaults to on",
-	[initial.newestFirst, initial.autoOpen, initial.autoClose, initial.reveal].join(","), "true,true,true,true");
+	[initial.newestFirst, initial.autoOpen, initial.autoClose, initial.reveal, initial.failureReason].join(","),
+	"true,true,true,true,true");
 check("nothing is stored before the first save", Object.keys(initial.stored).length, 0);
 check("the page is told where the store lives", initial.file, storeFile);
 
@@ -1577,6 +1603,134 @@ const modelsBroken = await call({ url: modelsUrl([CHILD_ID]) }, corruptLog);
 check("an unreadable log is that row's error, not the batch's", modelsBroken.status, 200);
 check("the unreadable row keeps its reason", modelsBroken.entries[0].error, "log is corrupt");
 check("an unreadable row is marked as an error", modelsBroken.entries[0].state, "error");
+
+// ------------------------------------------------ settlement diagnosis (host)
+//
+// A continuable child that stops without finishing is announced to its parent as
+// one bare sentence, because the harness builds that notice from `{stopReason,
+// output}` alone and the provider's own failure detail never reaches it. The
+// detail is not lost: it is in the child's own log as its last `turn/end`
+// reason. So the listener below reads it there and appends it to the very notice
+// that triggered the read. These checks drive that real listener.
+
+const FAILED_ID = "session-4eb83dce-c96c-4b6e-99c4-d35c0e61e12b";
+const FINISHED_ID = "session-2f1c8a44-0b9e-4d1f-9a3e-77c2b6e5d010";
+const UNTURNED_ID = "session-9d7e51c2-3a44-4b8e-8f21-6c0d3f9a2b47";
+const PROVIDER_MESSAGE = '400 data: {"error":{"code":"data_inspection_failed","param":null,'
+	+ '"message":"Input text data may contain inappropriate content.","type":"data_inspection_failed"}}';
+
+const diagnosisLogs = new Map([
+	[FAILED_ID, {
+		session: { id: FAILED_ID },
+		events: [{
+			type: "turn/end",
+			seq: 104,
+			time: 1791431350513,
+			data: { turn: 1, reason: { kind: "error", error: { message: PROVIDER_MESSAGE, code: "INVALID_REQUEST" } } }
+		}]
+	}],
+	[FINISHED_ID, {
+		session: { id: FINISHED_ID },
+		events: [{ type: "turn/end", seq: 12, time: 1, data: { turn: 3, reason: { kind: "completed" } } }]
+	}],
+	[UNTURNED_ID, {
+		session: { id: UNTURNED_ID },
+		events: [{ type: "user/message", seq: 5, time: 1, data: { role: "user", content: [] } }]
+	}]
+]);
+const diagnosisQuery = {
+	readSession: async (sessionId) => {
+		const log = diagnosisLogs.get(sessionId);
+		if (log !== undefined) return log;
+		const error = new Error('session "' + sessionId + '" is not in this profile');
+		error.code = "SESSION_QUERY_SESSION_NOT_FOUND";
+		throw error;
+	}
+};
+const diagnosisRoute = mountHost({}, { sessionQuery: diagnosisQuery });
+
+/** The harness's own settlement notice, as `createSettlementMessage` writes it. */
+const notice = (childId, text) => ({
+	role: "user",
+	id: "notice-" + childId,
+	source: { kind: "subagent-settled", form: "notice", senderSessionId: childId },
+	content: [{ type: "text", text }]
+});
+const failedNotice = (childId) => notice(childId, "Background subagent " + childId + " failed before it finished.");
+
+/** Drive one mount's real pre-step listener with one step's messages. */
+async function step(index, messages, decide) {
+	const hook = hooksByMount[index].find((entry) => entry.event === "agent/pre-step");
+	if (hook === undefined) throw new Error("this mount registered no pre-step listener");
+	return hook.listener(
+		{ agent: { id: "session-parent" }, messages, turn: 1, step: 1, signal: undefined },
+		decide === undefined ? async () => ({ kind: "enter", messages }) : decide
+	);
+}
+
+check("the host subscribes where a parent's messages enter",
+	/scoped\.on\("agent\/pre-step"/.test(host), true);
+check("the diagnosis waits for session reads instead of assuming them",
+	/ctx\.inject\(\["sessionQuery"\]/.test(host), true);
+check("the diagnosis switch is a real field on both halves",
+	clientFields.split(",").includes("failureReason"), true);
+check("the listener is registered on this mount", hooksByMount[diagnosisRoute].length, 1);
+
+const bareNotice = failedNotice(FAILED_ID);
+const diagnosed = await step(diagnosisRoute, [bareNotice]);
+check("a diagnosed step still enters", diagnosed.kind, "enter");
+check("the notice as the harness wrote it is not mutated", bareNotice.content.length, 1);
+check("the reason travels inside the notice, not as a message of its own",
+	[diagnosed.messages.length, diagnosed.messages[0].content.length].join(","), "1,2");
+const diagnosis = diagnosed.messages[0].content[1].text;
+check("the diagnosis is marked as this plugin's", diagnosis.startsWith("[subagent-mgm]"), true);
+check("the diagnosis reports the stop reason", /ended with reason "error"/.test(diagnosis), true);
+check("the diagnosis names the turn it came from", /turn 1/.test(diagnosis), true);
+check("the diagnosis reports the provider's code", /code "INVALID_REQUEST"/.test(diagnosis), true);
+check("the diagnosis keeps the provider's own words", diagnosis.includes("data_inspection_failed"), true);
+check("the diagnosis is one readable line, not a paste of the log", diagnosis.includes("\n"), false);
+
+const again = await step(diagnosisRoute, [diagnosed.messages[0]]);
+check("a notice already diagnosed is not diagnosed twice", again.messages[0].content.length, 2);
+check("the second pass hands back the very message it was given",
+	again.messages[0] === diagnosed.messages[0], true);
+
+const finished = await step(diagnosisRoute, [notice(FINISHED_ID,
+	"Background subagent " + FINISHED_ID + " finished and will do no further work unless you send it more.")]);
+check("a child that completed reports the reason it recorded",
+	/ended with reason "completed"/.test(finished.messages[0].content[1].text), true);
+check("a clean stop carries no detail section",
+	finished.messages[0].content[1].text.includes("Detail:"), false);
+
+const unturned = await step(diagnosisRoute, [notice(UNTURNED_ID,
+	"Background subagent " + UNTURNED_ID + " was stopped before it finished.")]);
+check("a child that finished no turn says so rather than guessing",
+	/no completed turn/.test(unturned.messages[0].content[1].text), true);
+
+const orphaned = await step(diagnosisRoute, [failedNotice("session-nobody")]);
+check("a child with no log in this profile says exactly that",
+	/not in this profile/.test(orphaned.messages[0].content[1].text), true);
+
+const plain = [{ role: "user", id: "plain", content: [{ type: "text", text: "carry on" }] }];
+check("a step without a settlement notice is handed back untouched",
+	(await step(diagnosisRoute, plain)).messages === plain, true);
+
+const rejected = await step(diagnosisRoute, [failedNotice(FAILED_ID)], async () => ({ kind: "reject" }));
+check("a rejected step stays rejected", rejected.kind, "reject");
+
+const switchedOff = mountHost({ failureReason: false }, { sessionQuery: diagnosisQuery });
+const offNotice = failedNotice(FAILED_ID);
+const off = await step(switchedOff, [offNotice]);
+check("the switch turns the diagnosis off", off.messages[0].content.length, 1);
+check("the switched-off step hands back the notice as it came", off.messages[0] === offNotice, true);
+
+const switchedOn = mountHost({ failureReason: true }, { sessionQuery: diagnosisQuery });
+check("the switch turns the diagnosis on",
+	(await step(switchedOn, [failedNotice(FAILED_ID)])).messages[0].content.length, 2);
+
+const blind = mountHost({}, {});
+check("without session reads the notice is left alone, never failed",
+	(await step(blind, [failedNotice(FAILED_ID)])).messages[0].content.length, 1);
 
 rmSync(storeDir, { recursive: true, force: true });
 if (failures.length > 0) {

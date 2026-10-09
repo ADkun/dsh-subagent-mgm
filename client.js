@@ -18,7 +18,10 @@
  *     same place. The model behind those rows is read on demand from
  *     `/api/subagent-mgm/models`, because a model is named only in that subagent's
  *     own log. The share is taken over summed buckets, never averaged per row, so a
- *     tree total means what one log's share means.
+ *     tree total means what one log's share means. Every row says the same share
+ *     out loud: its usage reading runs three lines — tokens, live wall time, the
+ *     cache-hit share of what that row was billed — instead of two lines with the
+ *     share only in a tooltip, and a row billed nothing gets no third line.
  *  5. The same digest, smaller, fills a sidebar Session row's hover card: that
  *     row's subagent count, live tokens, cache share, wall time and up to four
  *     rows, read from the two client stores alone — the card stays local,
@@ -70,9 +73,9 @@ window.__ModuleLoader__.load({
 		/** Subagent rows a sidebar hover card lists before it counts the rest. */
 		const HOVER_ROWS = 4;
 		/** Every switch the settings page owns, in page order. */
-		const SETTING_FIELDS = ["newestFirst", "autoOpen", "autoClose", "reveal"];
+		const SETTING_FIELDS = ["newestFirst", "autoOpen", "autoClose", "reveal", "failureReason"];
 		/** Effective switches before the first host reply: the original behaviour. */
-		const DEFAULT_SETTINGS = Object.freeze({ newestFirst: true, autoOpen: true, autoClose: true, reveal: true });
+		const DEFAULT_SETTINGS = Object.freeze({ newestFirst: true, autoOpen: true, autoClose: true, reveal: true, failureReason: true });
 		/**
 		 * Live view of the switches, shared by the catalog and the panel keeper.
 		 * The host route is the durable record; this snapshot is what the UI reads.
@@ -310,6 +313,7 @@ window.__ModuleLoader__.load({
 .smgm-summary,.smgm-metrics{color:var(--dsw-alias-label-tertiary);font-size:10px;line-height:15px}
 .smgm-metrics{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap;flex:none;grid-template-rows:17px 15px;display:grid}
 .smgm-metricToken{grid-row:1;line-height:17px}
+.smgm-metricCache{grid-row:3}
 .smgm-metricDuration{grid-row:2}
 .smgm-sidebarButton{border-radius:var(--dsw-radius-sm);width:28px;height:28px;color:var(--dsw-alias-label-tertiary);cursor:pointer;background:0 0;border:0;flex:none;justify-content:center;align-items:center;margin:4px 0;padding:6px;display:inline-flex}
 .smgm-sidebarButton:hover,.smgm-sidebarButton:focus-visible{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12));color:var(--dsw-alias-label-primary)}
@@ -472,11 +476,14 @@ window.__ModuleLoader__.load({
 			"settings.autoCloseHint": "手动打开的面板同样会在该子智能体结束时关闭。",
 			"settings.reveal": "面板已开在后台时自动拎到前台",
 			"settings.revealHint": "关闭后不抢前台：面板已在后台标签里就保持原样，需要你自己切过去。",
+			"settings.failureReason": "子智能体结束时，把它的真实失败原因带给父智能体",
+			"settings.failureReasonHint": "读取子智能体自己的日志，把最后一轮的停止原因（错误码与原报文）补进那条结束通知；关闭后父智能体只看到 “failed before it finished”。",
 			"settings.current": "当前生效",
 			"settings.short.newestFirst": "倒序",
 			"settings.short.autoOpen": "自动打开",
 			"settings.short.autoClose": "自动关闭",
 			"settings.short.reveal": "拎到前台",
+			"settings.short.failureReason": "真实原因",
 			"settings.sep": " · ",
 			"settings.on": "开",
 			"settings.off": "关",
@@ -550,6 +557,7 @@ window.__ModuleLoader__.load({
 			"totals.tokensWithSelf": "合计 {value}（本会话 {self}）",
 			"totals.selfTitle": "这一屏会话自己用掉的部分，已算进这个合计：命中 {hit} · 写入 {written} · 提示合计 {prompt}（未命中 {missed}）",
 			"cache.percent": "缓存命中 {percent}%",
+			"cache.rowPercent": "缓存 {percent}%",
 			"cache.exactTitle": "命中 {hit} · 提示合计 {prompt}（未命中 {missed}）",
 			"cache.stripTitle": "命中 {hit} · 写入 {written} · 提示合计 {prompt}（未命中 {missed}）",
 			"tokens.exactTitle": "合计 {value} tok",
@@ -616,11 +624,14 @@ window.__ModuleLoader__.load({
 			"settings.autoCloseHint": "A panel you opened by hand closes on the same transition.",
 			"settings.reveal": "Bring a background panel forward",
 			"settings.revealHint": "Off leaves an already open background panel alone; switch to it yourself.",
+			"settings.failureReason": "Tell the parent why its subagent stopped",
+			"settings.failureReasonHint": "Reads the subagent's own log and appends its last turn's stop reason, code and raw detail to the settlement notice; off leaves the parent with \"failed before it finished\".",
 			"settings.current": "In effect now",
 			"settings.short.newestFirst": "newest-first",
 			"settings.short.autoOpen": "auto-open",
 			"settings.short.autoClose": "auto-close",
 			"settings.short.reveal": "bring forward",
+			"settings.short.failureReason": "real reason",
 			"settings.sep": " · ",
 			"settings.on": "on",
 			"settings.off": "off",
@@ -694,6 +705,7 @@ window.__ModuleLoader__.load({
 			"totals.tokensWithSelf": "{value} total ({self} here)",
 			"totals.selfTitle": "What this on-screen session spent itself, already counted in this total: hit {hit} · written {written} · prompt {prompt} (missed {missed})",
 			"cache.percent": "Cache hit {percent}%",
+			"cache.rowPercent": "Cache {percent}%",
 			"cache.exactTitle": "Hit {hit} · prompt {prompt} (missed {missed})",
 			"cache.stripTitle": "Hit {hit} · written {written} · prompt {prompt} (missed {missed})",
 			"tokens.exactTitle": "{value} tok total",
@@ -1293,13 +1305,18 @@ window.__ModuleLoader__.load({
 				const usageValue = summary?.projectionValues?.tokenUsage;
 				const totalTokens = tokenTotal(usageValue);
 				const tokenMetric = totalTokens === undefined ? undefined : t("tokens.total", { value: formatTokens(totalTokens, t) });
-				const rowCacheHit = cacheHitPercent(usageValue?.cacheReadTokens, billedInputTokens(usageValue));
+				const rowCacheRead = usageValue?.cacheReadTokens ?? 0;
+				const rowBilledInput = billedInputTokens(usageValue) ?? 0;
+				const rowCacheHit = cacheHitPercent(rowCacheRead, rowBilledInput);
+				// The row's own line drops the word the strip keeps: at 336px the
+				// two extra characters cost the row name, and the number is the same.
+				const cacheMetric = rowCacheHit === null ? undefined : t("cache.rowPercent", { percent: rowCacheHit });
 				const durationMs = activityDuration(summary, activity, now);
 				const durationMetric = durationMs === undefined ? undefined : {
 					compact: formatDuration(durationMs, t),
 					exact: formatExactDuration(durationMs, t)
 				};
-				const metrics = [tokenMetric, durationMetric?.exact].filter((value) => value !== undefined).join(" · ");
+				const metrics = [tokenMetric, durationMetric?.exact, cacheMetric].filter((value) => value !== undefined).join(" · ");
 				const isExpanded = expanded.has(entry.id) || filtering;
 				const open = () => {
 					openChild({ parentSessionId, childSessionId: entry.id, mode: entry.mode });
@@ -1362,7 +1379,15 @@ window.__ModuleLoader__.load({
 							h("span", {
 								className: "smgm-metricDuration",
 								title: durationMetric === undefined ? undefined : t("duration.exactTitle", { duration: durationMetric.exact })
-							}, durationMetric?.compact ?? "")),
+							}, durationMetric?.compact ?? ""),
+							cacheMetric === undefined ? null : h("span", {
+								className: "smgm-metricCache",
+								title: t("cache.exactTitle", {
+									hit: formatExactTokens(rowCacheRead),
+									prompt: formatExactTokens(rowBilledInput),
+									missed: formatExactTokens(Math.max(0, rowBilledInput - rowCacheRead))
+								})
+							}, cacheMetric)),
 						h("button", {
 							type: "button",
 							className: "smgm-faceButton",
@@ -2303,7 +2328,7 @@ window.__ModuleLoader__.load({
 								prompt: formatExactTokens(billed),
 								missed: formatExactTokens(Math.max(0, billed - read))
 							})
-						}, t("cache.percent", { percent: hit })));
+						}, t("cache.rowPercent", { percent: hit })));
 				})),
 				hidden <= 0 ? null : h("div", { className: "smgm-digestNote" }, t("hover.more", { count: hidden })));
 		}
@@ -2681,7 +2706,8 @@ window.__ModuleLoader__.load({
 				["newestFirst", "settings.newestFirst", "settings.newestFirstHint"],
 				["autoOpen", "settings.autoOpen", "settings.autoOpenHint"],
 				["autoClose", "settings.autoClose", "settings.autoCloseHint"],
-				["reveal", "settings.reveal", "settings.revealHint"]
+				["reveal", "settings.reveal", "settings.revealHint"],
+				["failureReason", "settings.failureReason", "settings.failureReasonHint"]
 			].map(([field, label, hint]) =>
 				h(
 					"label",

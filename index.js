@@ -4,12 +4,13 @@
  * Both behaviours live in the browser, but their switches must survive a page
  * reload there, so this half owns their durable side: the same-origin route
  * `/api/subagent-mgm/settings` (GET / POST / DELETE) backs the Settings page
- * and keeps the four switches in `<DSH_PROFILE_DIR|DSH_HOME|~/.dsh>/subagent-mgm.json`,
+ * and keeps the five switches in `<DSH_PROFILE_DIR|DSH_HOME|~/.dsh>/subagent-mgm.json`,
  * beside the profile that owns this row.
  *
  * Per field the effective value is: the saved file, else this row's own Config,
- * else the built-in default. Nothing on the host reads these values — the
- * browser half applies them to ordering and to the automatic sidebar panels.
+ * else the built-in default. Nothing on the host reads the first four values —
+ * the browser half applies them to ordering and to the automatic sidebar panels.
+ * The fifth (`failureReason`) is read here, by the settlement hook below.
  *
  * The same prefix also serves `/api/subagent-mgm/face?sessionId=…` (GET), read
  * only: the capability face of one subagent — the tools its last request
@@ -22,6 +23,15 @@
  * for a whole batch, reduced to the model behind each id, so the catalog can
  * total its tree by model without one request per row. It reads one log per id,
  * so the batch is capped and each id's failure stays its own. See `modelsFor`.
+ *
+ * The `agent/pre-step` hook closes a gap the harness leaves open. A continuable
+ * subagent that fails is announced to its parent as a bare sentence — "failed
+ * before it finished", with no reason — because the settlement message is built
+ * from `{stopReason, output}` alone, and the provider's own failure detail is
+ * dropped on that path. The detail is not lost: it is durably in the child's log
+ * as the `turn/end` reason. So when a settlement notice enters a parent's step,
+ * this half reads the child's log and appends what it finds to that same message.
+ * See `settlementNote`.
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -37,12 +47,14 @@ const DEFAULT_AUTO_OPEN = true;
 const DEFAULT_AUTO_CLOSE = true;
 /** Bring an already open panel forward; off means never steal focus. */
 const DEFAULT_REVEAL = true;
+/** Tell a parent why its subagent stopped, from the subagent's own log (behaviour 5). */
+const DEFAULT_FAILURE_REASON = true;
 
 const ROUTE_PATH = "/api/subagent-mgm";
 const STORE_NAME = "subagent-mgm.json";
 const MAX_BODY_BYTES = 64 * 1024;
 /** Every switch this page owns, in page order. */
-const FIELDS = ["newestFirst", "autoOpen", "autoClose", "reveal"];
+const FIELDS = ["newestFirst", "autoOpen", "autoClose", "reveal", "failureReason"];
 
 /** Sub-path that answers with one subagent's capability face. */
 const FACE_ROUTE = "/face";
@@ -60,6 +72,11 @@ const MAX_PERSONA_CHARS = 20_000;
  * it is not a persona anybody chose, so the answer says which one it is.
  */
 const GENERATED_PERSONA = /^You are a(n)? (coding )?agent powered by the .+ model\.$/;
+
+/** Marks an appended note as this plugin's, so a re-entry can recognise its own work. */
+const NOTE_MARK = "[subagent-mgm]";
+/** Cap on one appended diagnosis; a provider's raw failure body can be huge. */
+const MAX_NOTE_CHARS = 2_000;
 
 /** Accept a JSON boolean or its string spelling; anything else is absent. */
 function validFlag(value) {
@@ -80,6 +97,7 @@ function defaults() {
 		autoOpen: DEFAULT_AUTO_OPEN,
 		autoClose: DEFAULT_AUTO_CLOSE,
 		reveal: DEFAULT_REVEAL,
+		failureReason: DEFAULT_FAILURE_REASON,
 	};
 }
 
@@ -210,6 +228,12 @@ function textOf(message) {
 		.filter((block) => block?.type === "text" && typeof block.text === "string")
 		.map((block) => block.text)
 		.join("");
+}
+
+/** One line's worth of somebody else's text, never longer than the cap. */
+function clip(value) {
+	const text = `${value}`.replace(/\s+/g, " ").trim();
+	return text.length <= MAX_NOTE_CHARS ? text : `${text.slice(0, MAX_NOTE_CHARS)}…`;
 }
 
 /**
@@ -433,6 +457,64 @@ async function modelsFor(ctx, sessionIds) {
 	return { ok: true, entries };
 }
 
+/** Is this the harness's own notice that a continuable child settled? */
+function isSettlementNotice(message) {
+	const source = message?.source;
+	return message?.role === "user" &&
+		source?.kind === "subagent-settled" &&
+		typeof source.senderSessionId === "string" &&
+		SESSION_ID.test(source.senderSessionId);
+}
+
+/** Has a previous step already annotated this notice? The note is its own witness. */
+function isAnnotated(message) {
+	const blocks = Array.isArray(message?.content) ? message.content : [];
+	return blocks.some((block) => block?.type === "text" && typeof block.text === "string"
+		&& block.text.includes(NOTE_MARK));
+}
+
+/**
+ * Why the child stopped, read from the child's own durable log.
+ *
+ * The harness announces a non-completed child to its parent with a sentence and
+ * nothing else — the settlement message carries `{stopReason, output}` and the
+ * provider's failure detail is not part of it. That detail is not lost: every
+ * turn that ends unsuccessfully writes a `turn/end` event whose `reason` holds
+ * the provider's own error, code and all. This reads the last one back out.
+ *
+ * Every branch returns a sentence rather than nothing, because "its log records
+ * no failure" is itself the answer a parent needs: it says the run stopped
+ * between turns and re-probing the child cannot recover anything.
+ * @returns the note to append, or null when this child is simply not ours to read.
+ */
+async function settlementNote(query, childId) {
+	let snapshot;
+	try {
+		snapshot = await query.readSession(childId);
+	} catch (error) {
+		if (error?.code === "SESSION_QUERY_SESSION_NOT_FOUND") {
+			return `${NOTE_MARK} Its own log is not in this profile, so no failure detail can be recovered from it.`;
+		}
+		return `${NOTE_MARK} Its own log could not be read (${clip(error?.message ?? error)}), so no failure detail can be recovered.`;
+	}
+	const events = Array.isArray(snapshot?.events) ? snapshot.events : [];
+	const end = lastEventOf(events, "turn/end");
+	if (end === undefined) {
+		return `${NOTE_MARK} Its own log records no completed turn, so it stopped before finishing one.`;
+	}
+	const reason = end.data?.reason ?? {};
+	const kind = typeof reason.kind === "string" ? reason.kind : "unknown";
+	const failure = reason.error ?? reason.failure ?? {};
+	const turn = end.data?.turn;
+	const parts = [`its last turn${turn === undefined ? "" : ` (turn ${turn})`} ended with reason "${kind}"`];
+	if (typeof failure.code === "string" && failure.code !== "") parts.push(`code "${failure.code}"`);
+	const head = `${NOTE_MARK} Its own log records that ${parts.join(", ")}.`;
+	const message = typeof failure.message === "string" && failure.message !== ""
+		? failure.message
+		: typeof failure.type === "string" && failure.type !== "" ? failure.type : null;
+	return message === null ? head : `${head} Detail: ${clip(message)}`;
+}
+
 /**
  * Register the settings route. `webServer` is asked for rather than injected, so
  * a composition without an HTTP carrier loses the page but keeps the plugin.
@@ -457,6 +539,16 @@ export function apply(ctx, config = {}) {
 			fields: [...FIELDS],
 			file,
 		};
+	}
+
+	/**
+	 * The switch's effective value. Unlike the four UI switches this one is read
+	 * here, and only once a step actually carries a settlement notice, so the
+	 * settings file is not read on every step.
+	 */
+	function effectiveFlag(field) {
+		const stored = readStored(file);
+		return stored[field] ?? configured[field] ?? defaults()[field];
 	}
 
 	ctx.inject(["webServer"], (scoped) => {
@@ -598,6 +690,57 @@ export function apply(ctx, config = {}) {
 					},
 				}),
 			"subagent-mgm: settings api",
+		);
+	});
+
+	/**
+	 * Hand a parent the reason its child stopped, at the moment the harness tells
+	 * it the child stopped and no earlier: the notice is what triggers the read,
+	 * so a plugin that is not told never pays for one.
+	 *
+	 * The note is appended to the notice's own message rather than sent as its
+	 * own, because the two must travel together — a parent that reads "failed
+	 * before it finished" three steps after the reason has already re-planned
+	 * around a guess. The message is rebuilt, never mutated: the notice as
+	 * journaled stays exactly what the harness wrote, and only the copy entering
+	 * this step carries the diagnosis.
+	 *
+	 * A settlement notice named by one step cannot be annotated by the next,
+	 * because the note itself is the witness (`isAnnotated`). Everything here is
+	 * guarded: a hook that throws would fail the parent's step, which is a far
+	 * worse outcome than a missing line.
+	 */
+	ctx.inject(["sessionQuery"], (scoped) => {
+		scoped.effect(
+			() =>
+				scoped.on("agent/pre-step", async (payload, next) => {
+					const decision = await next();
+					if (decision?.kind !== "enter" || !Array.isArray(decision.messages)) return decision;
+					if (!decision.messages.some((message) => isSettlementNotice(message) && !isAnnotated(message))) {
+						return decision;
+					}
+					if (effectiveFlag("failureReason") !== true) return decision;
+					const query = scoped.get("sessionQuery");
+					if (query === undefined || typeof query.readSession !== "function") return decision;
+					try {
+						const messages = [];
+						for (const message of decision.messages) {
+							if (!isSettlementNotice(message) || isAnnotated(message)) {
+								messages.push(message);
+								continue;
+							}
+							const note = await settlementNote(query, message.source.senderSessionId);
+							const blocks = Array.isArray(message.content) ? message.content : [];
+							messages.push(note === null
+								? message
+								: { ...message, content: [...blocks, { type: "text", text: note }] });
+						}
+						return { ...decision, messages };
+					} catch {
+						return decision;
+					}
+				}),
+			"subagent-mgm: settlement diagnosis",
 		);
 	});
 }
