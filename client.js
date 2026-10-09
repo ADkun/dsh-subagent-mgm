@@ -556,6 +556,8 @@ window.__ModuleLoader__.load({
 			"totals.partial": "{count} 个没有用量数据",
 			"totals.tokensWithSelf": "合计 {value}（本会话 {self}）",
 			"totals.selfTitle": "这一屏会话自己用掉的部分，已算进这个合计：命中 {hit} · 写入 {written} · 提示合计 {prompt}（未命中 {missed}）",
+			"totals.durationSelfTitle": "这个合计含这一屏会话自己的 {self}（模型时间 + 工具时间，不含排队与等待输入），其余 {rest} 是子智能体的活跃计时",
+			"totals.durationSelfOnlyTitle": "这个合计就是这一屏会话自己的 {self}（模型时间 + 工具时间，不含排队与等待输入），没有子智能体的计时",
 			"cache.percent": "缓存命中 {percent}%",
 			"cache.rowPercent": "缓存 {percent}%",
 			"cache.exactTitle": "命中 {hit} · 提示合计 {prompt}（未命中 {missed}）",
@@ -704,6 +706,8 @@ window.__ModuleLoader__.load({
 			"totals.partial": "{count} without usage data",
 			"totals.tokensWithSelf": "{value} total ({self} here)",
 			"totals.selfTitle": "What this on-screen session spent itself, already counted in this total: hit {hit} · written {written} · prompt {prompt} (missed {missed})",
+			"totals.durationSelfTitle": "This total counts {self} this on-screen session worked itself (model time + tool time, no queueing or waiting for input); the other {rest} is subagent active time",
+			"totals.durationSelfOnlyTitle": "This total is {self} this on-screen session worked itself (model time + tool time, no queueing or waiting for input); no subagent timing is in it",
 			"cache.percent": "Cache hit {percent}%",
 			"cache.rowPercent": "Cache {percent}%",
 			"cache.exactTitle": "Hit {hit} · prompt {prompt} (missed {missed})",
@@ -1002,7 +1006,8 @@ window.__ModuleLoader__.load({
 			 * @param id - the session whose usage is counted.
 			 * @param activity - "running" or "inactive".
 			 * @param asRow - whether this session is a row of the tree.
-			 * @returns the node the model grouping reads.
+			 * @returns the node the model grouping reads, carrying the working time
+			 *   this fold counted so the strip can name it.
 			 */
 			const account = (id, activity, asRow) => {
 				const summary = summaries[id];
@@ -1011,7 +1016,16 @@ window.__ModuleLoader__.load({
 				const billed = billedInputTokens(usageValue);
 				const cacheRead = typeof usageValue?.cacheReadTokens === "number" ? usageValue.cacheReadTokens : 0;
 				const cacheWrite = typeof usageValue?.cacheWriteTokens === "number" ? usageValue.cacheWriteTokens : 0;
-				const durationMs = activityDuration(summary, activity, now);
+				// Delegated timing wins where it exists: while this screen *is* a
+				// delegated session the number here has to be the one the same session
+				// shows as a row one level up, or the two would drift and adding them
+				// would count the same work twice. Only the session the tree hangs off
+				// may fall back, because a delegated row's `sessionStats` describes a
+				// different span than its `subagentTiming` — the row would then claim a
+				// duration no row-level reading can explain, so a row without timing
+				// stays unknown instead of borrowing it.
+				const durationMs = activityDuration(summary, activity, now)
+					?? (asRow ? undefined : sessionWork(summary?.projectionValues?.sessionStats)?.ms);
 				if (asRow) {
 					totals.count += 1;
 					if (activity === "running") totals.running += 1;
@@ -1025,6 +1039,10 @@ window.__ModuleLoader__.load({
 				else totals.durationMs += Math.max(0, durationMs);
 				return {
 					id, tokens: tokens ?? 0, running: activity === "running",
+					// The node carries the work it folded in, so the strip can name this
+					// session's own share of the total without folding `sessionStats` a
+					// second time at render time — one arithmetic, one number.
+					durationMs: durationMs === undefined ? 0 : Math.max(0, durationMs),
 					cacheRead, cacheWrite, billedInput: billed ?? 0
 				};
 			};
@@ -1551,6 +1569,19 @@ window.__ModuleLoader__.load({
 				: modelState === "error" ? h("span", { className: "smgm-modelError" }, t("models.failed"))
 					: modelState === "ready" ? h("div", { className: "smgm-models" }, groupsBody)
 						: null;
+			// The duration item keeps its visible text as the bare total: that line is
+			// already three items wide in a 336px menu, and a parenthesised share here
+			// would push it onto a third line. The share is named on hover instead,
+			// read off the node the one arithmetic already folded, so nothing is added
+			// up twice and the strip still says what the session itself contributed.
+			const selfDuration = totals.self === null ? 0 : totals.self.durationMs;
+			const restDuration = Math.max(0, totals.durationMs - selfDuration);
+			const durationTitle = selfDuration <= 0 ? formatExactDuration(totals.durationMs, t)
+				: restDuration === 0 ? t("totals.durationSelfOnlyTitle", { self: formatExactDuration(selfDuration, t) })
+					: t("totals.durationSelfTitle", {
+						self: formatExactDuration(selfDuration, t),
+						rest: formatExactDuration(restDuration, t)
+					});
 			return h(React.Fragment, null,
 				h("div", { className: "smgm-totals" },
 					h("span", { className: "smgm-totalsItem" }, t("totals.loaded", { count: totals.count })),
@@ -1562,7 +1593,7 @@ window.__ModuleLoader__.load({
 				h("div", { className: "smgm-totals" },
 					totalsItem,
 					cacheItem,
-					h("span", { className: "smgm-totalsItem", title: formatExactDuration(totals.durationMs, t) },
+					h("span", { className: "smgm-totalsItem", title: durationTitle },
 						t("totals.duration", { duration: formatDuration(totals.durationMs, t) }))),
 				h("div", { className: "smgm-modelHead" },
 					h("button", {

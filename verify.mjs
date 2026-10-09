@@ -640,7 +640,8 @@ const totalsSource = source.slice(
 );
 const totalsApi = new Function(
 	extract("tokenTotal") + "\n" + extract("billedInputTokens") + "\n" + extract("cacheHitPercent") + "\n" +
-	extract("activityDuration") + "\n" + extract("catalogOf") + "\n" +
+	extract("activityDuration") + "\n" + extract("sessionWork") + "\n" + extract("formatExactDuration") + "\n" +
+	extract("catalogOf") + "\n" +
 	extract("activityOf") + "\n" + extract("filterActive") + "\n" + extract("entryMatches") + "\n" +
 	extract("subtreeMatches") + "\n" + extract("catalogTotals") + "\n" + extract("modelOf") + "\n" +
 	extract("groupModels") +
@@ -685,7 +686,8 @@ check("the tree indents through its own container, not the scrolling body",
 check("both dictionaries translate the filter, the totals and the hover card", [
 	"controls.placeholder", "controls.searchAria", "controls.clear", "filter.all", "filter.inactive",
 	"filter.oneShot", "filter.empty", "totals.loaded", "totals.running", "totals.tokens", "totals.duration",
-	"totals.none", "totals.partial", "totals.tokensWithSelf", "totals.selfTitle", "models.fetch", "models.refetch", "models.hint", "models.loading",
+	"totals.none", "totals.partial", "totals.tokensWithSelf", "totals.selfTitle",
+	"totals.durationSelfTitle", "totals.durationSelfOnlyTitle", "models.fetch", "models.refetch", "models.hint", "models.loading",
 	"models.failed", "models.empty", "models.unknown", "models.unknownNote", "models.delegated", "models.times",
 	"cache.percent", "cache.rowPercent", "cache.exactTitle", "cache.stripTitle", "tokens.exactTitle", "tokens.cacheTitle", "hover.more",
 	"hover.selfTokens", "hover.workTime", "hover.workTitle"
@@ -711,7 +713,7 @@ check("a row shortens the label the strip spells out, in both dictionaries",
 	&& /"cache\.percent": "Cache hit \{percent\}%"/.test(source), true);
 check("counts and usage are separate lines, so neither reflows the other",
 	/className: "smgm-totals" \},\n\t+h\("span", \{ className: "smgm-totalsItem" \}, t\("totals\.loaded", \{ count: totals\.count \}\)\),\n\t+totals\.running === 0 \? null : h\("span", \{ className: "smgm-totalsItem" \}, t\("totals\.running"/.test(totalsSource)
-	&& /className: "smgm-totals" \},\n\t+totalsItem,\n\t+cacheItem,\n\t+h\("span", \{ className: "smgm-totalsItem", title: formatExactDuration/.test(totalsSource), true);
+	&& /className: "smgm-totals" \},\n\t+totalsItem,\n\t+cacheItem,\n\t+h\("span", \{ className: "smgm-totalsItem", title: durationTitle/.test(totalsSource), true);
 check("a row without usage is counted with the other counts",
 	/partial\),\n\t+h\("div", \{ className: "smgm-totals" \},\n\t+totalsItem,/.test(totalsSource), true);
 check("a model row may wrap rather than overflow the narrow menu",
@@ -913,6 +915,57 @@ check("the one-shot switch does not turn it into a delegation", [
 	(totalsWithSelf({ text: "", activity: "all", oneShot: true }).self === null)
 ].join("|"), "3,1,171,6000,0,0|true");
 
+// The session's own working time is the same number a childless Session shows on
+// hover — `sessionStats` folded to `llmMs + toolMs` — so the duration total covers
+// the work done on this screen, not only the work delegated from it. A session
+// that was itself delegated keeps its delegation timing, which is the number the
+// same session shows as a row one level up: using both would count it twice.
+// The same tree, with the session it hangs off swapped for one that has its own
+// working time recorded; the rows keep their summaries, so only the session's own
+// half of the arithmetic can move the numbers below.
+const selfWorkSummaries = {
+	...filterSummaries,
+	"session-clocked": {
+		title: "The session at work", cwd: "D:\\dsh", running: false,
+		projectionValues: {
+			tokenUsage: usage(10, 5, 0, 0),
+			sessionStats: { llmMs: 700000, toolMs: 50000 }
+		}
+	},
+	"session-hosted": {
+		title: "The session run as a subagent", cwd: "D:\\dsh", running: false,
+		projectionValues: {
+			tokenUsage: usage(10, 5, 0, 0),
+			sessionStats: { llmMs: 700000, toolMs: 50000 },
+			subagentTiming: { settledMs: 500 }
+		}
+	},
+	"session-quiet": { title: "The session with nothing recorded", cwd: "D:\\dsh", running: false }
+};
+const totalsOfSelf = (selfId) =>
+	totalsApi.catalogTotals(treeView, undefined, filterProjections, selfWorkSummaries, filterStatuses, 6000, selfId);
+check("the session's own working time is counted in the duration total",
+	shape(totalsOfSelf("session-clocked")), "4,1,186,756000,1,1");
+check("the node carries the working time it folded in, not a second sum",
+	totalsOfSelf("session-clocked").self.durationMs, 750000);
+check("a delegated session counts its delegation timing once, never both",
+	[shape(totalsOfSelf("session-hosted")), totalsOfSelf("session-hosted").self.durationMs].join("|"),
+	"4,1,186,6500,1,1|500");
+check("a session with neither timing nor work stays unknown, never zero",
+	[shape(totalsOfSelf("session-quiet")),
+		totalsOfSelf("session-quiet").nodes.map((node) => node.id).join(",")].join("|"),
+	"4,1,171,6000,2,2|session-quiet,session-alpha,session-delta,session-beta,session-gamma");
+check("a row without delegation timing is still unknown, and borrows no work",
+	[shape(totalsWithSelf(undefined, "session-beta", treeView, 6000)),
+		totalsWithSelf(undefined, "session-beta", treeView, 6000).nodes
+			.find((node) => node.id === "session-alpha").durationMs].join("|"),
+	"3,1,171,6000,1,1|3000");
+check("the same filter rule decides whether the session's work counts", [
+	shape(totalsApi.catalogTotals(treeView, { text: "at work", activity: "all", oneShot: false }, filterProjections, selfWorkSummaries, filterStatuses, 6000, "session-clocked")),
+	totalsApi.catalogTotals(treeView, { text: "at work", activity: "all", oneShot: false }, filterProjections, selfWorkSummaries, filterStatuses, 6000, "session-clocked").self === null,
+	shape(totalsApi.catalogTotals(treeView, { text: "", activity: "all", oneShot: true }, filterProjections, selfWorkSummaries, filterStatuses, 6000, "session-clocked"))
+].join("|"), "0,0,15,750000,0,0|false|3,1,171,6000,0,0");
+
 // Static half of the same rule: the session has to go through the arithmetic the
 // rows go through, so changing one of them cannot leave the other behind.
 check("the session is folded in by the rows' own arithmetic",
@@ -923,6 +976,23 @@ check("the rows' filter decides the session too, so the two cannot disagree",
 	/entryMatches\(\{ id: selfId \}, filter, summaries, statuses\)/.test(source), true);
 check("the session is counted once, never again as a row",
 	/seen\.add\(selfId\);/.test(source), true);
+// The session's own half of the duration total is the non-row equation of the one
+// fold the rows share, and the node hands that number to the strip: no second
+// arithmetic at render time, and delegated timing still wins where it exists.
+check("the session's own working time rides the rows' own arithmetic",
+	/const durationMs = activityDuration\(summary, activity, now\)\n\t+\?\? \(asRow \? undefined : sessionWork\(summary\?\.projectionValues\?\.sessionStats\)\?\.ms\);/.test(source), true);
+check("the fold hands back the working time it counted, so the strip names it",
+	/durationMs: durationMs === undefined \? 0 : Math\.max\(0, durationMs\),/.test(source)
+	&& /const selfDuration = totals\.self === null \? 0 : totals\.self\.durationMs;/.test(totalsSource), true);
+check("the duration item names the session's own share on hover, not in its text",
+	/t\("totals\.duration", \{ duration: formatDuration\(totals\.durationMs, t\) \}\)/.test(totalsSource)
+	&& /t\("totals\.durationSelfTitle", \{\n\t+self: formatExactDuration\(selfDuration, t\),\n\t+rest: formatExactDuration\(restDuration, t\)/.test(totalsSource)
+	&& /t\("totals\.durationSelfOnlyTitle", \{ self: formatExactDuration\(selfDuration, t\) \}\)/.test(totalsSource), true);
+check("both dictionaries name the session's own share of the duration",
+	/"totals\.durationSelfTitle": "这个合计含这一屏会话自己的 \{self\}/.test(source)
+	&& /"totals\.durationSelfOnlyTitle": "这个合计就是这一屏会话自己的 \{self\}/.test(source)
+	&& /"totals\.durationSelfTitle": "This total counts \{self\}/.test(source)
+	&& /"totals\.durationSelfOnlyTitle": "This total is \{self\}/.test(source), true);
 check("the session's share is named inside the token item, not as a new one",
 	/const totalsItem = selfShare === null\n\t+\? h\("span", \{ className: "smgm-totalsItem" \}, t\("totals\.tokens", \{ value: formatTokens\(totals\.tokens, t\) \}\)\)\n\t+: h\("span", \{ className: "smgm-totalsItem", title: selfShare \},/.test(totalsSource)
 	&& /t\("totals\.tokensWithSelf", \{\n\t+value: formatTokens\(totals\.tokens, t\),\n\t+self: formatTokens\(totals\.self\.tokens, t\)/.test(totalsSource), true);
