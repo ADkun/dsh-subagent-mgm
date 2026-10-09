@@ -814,7 +814,8 @@ window.__ModuleLoader__.load({
 		 * @param summary - the child session summary, if it exists.
 		 * @param activity - "running" or "inactive".
 		 * @param now - sampled wall clock for a running child.
-		 * @returns the active duration in milliseconds, or undefined without timing.
+		 * @returns the active duration in milliseconds, or undefined when there is
+		 *   no Session or no `subagentTiming` key at all.
 		 */
 		function activityDuration(summary, activity, now) {
 			if (summary === undefined) return undefined;
@@ -823,6 +824,21 @@ window.__ModuleLoader__.load({
 			if (timing.active === undefined) return timing.settledMs;
 			const end = activity === "running" ? now : timing.active.through;
 			return timing.settledMs + Math.max(0, end - timing.active.since);
+		}
+		/**
+		 * Whether a session's `subagentTiming` describes real delegation work.
+		 *
+		 * The host registers that projection for *every* session, with
+		 * `init: () => ({ descriptorSeen: false, settledMs: 0 })`, and its wire view
+		 * drops `descriptorSeen` — so a session that was never delegated is handed to
+		 * the browser as the shell `{ settledMs: 0 }` rather than with no key at all.
+		 * "The key exists" therefore cannot mean "this session has delegated work",
+		 * which is why the caller may not decide on `??` alone.
+		 * @param timing - the `subagentTiming` wire view, or undefined.
+		 * @returns true only when it carries a settled amount or a live interval.
+		 */
+		function hasDelegatedTiming(timing) {
+			return timing !== undefined && (timing.active !== undefined || timing.settledMs > 0);
 		}
 		/**
 		 * Split a duration into its calendar parts.
@@ -1016,16 +1032,22 @@ window.__ModuleLoader__.load({
 				const billed = billedInputTokens(usageValue);
 				const cacheRead = typeof usageValue?.cacheReadTokens === "number" ? usageValue.cacheReadTokens : 0;
 				const cacheWrite = typeof usageValue?.cacheWriteTokens === "number" ? usageValue.cacheWriteTokens : 0;
-				// Delegated timing wins where it exists: while this screen *is* a
+				// Delegated timing wins where it really exists: while this screen *is* a
 				// delegated session the number here has to be the one the same session
 				// shows as a row one level up, or the two would drift and adding them
-				// would count the same work twice. Only the session the tree hangs off
-				// may fall back, because a delegated row's `sessionStats` describes a
-				// different span than its `subagentTiming` — the row would then claim a
-				// duration no row-level reading can explain, so a row without timing
-				// stays unknown instead of borrowing it.
-				const durationMs = activityDuration(summary, activity, now)
-					?? (asRow ? undefined : sessionWork(summary?.projectionValues?.sessionStats)?.ms);
+				// would count the same work twice. "It exists" is not enough to win,
+				// though: the host hands *every* session a `{ settledMs: 0 }` shell, so
+				// asking only `??` would let it eat the fallback and this screen's own
+				// session could never reach its own working time. Only the session the
+				// tree hangs off may fall back, because a delegated row's `sessionStats`
+				// describes a different span than its `subagentTiming` — the row would
+				// then claim a duration no row-level reading can explain, so a row
+				// without timing stays unknown instead of borrowing it.
+				const timing = summary?.projectionValues?.subagentTiming;
+				const durationMs = asRow
+					? activityDuration(summary, activity, now)
+					: hasDelegatedTiming(timing) ? activityDuration(summary, activity, now)
+						: sessionWork(summary?.projectionValues?.sessionStats)?.ms;
 				if (asRow) {
 					totals.count += 1;
 					if (activity === "running") totals.running += 1;

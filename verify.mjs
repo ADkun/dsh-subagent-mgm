@@ -640,12 +640,12 @@ const totalsSource = source.slice(
 );
 const totalsApi = new Function(
 	extract("tokenTotal") + "\n" + extract("billedInputTokens") + "\n" + extract("cacheHitPercent") + "\n" +
-	extract("activityDuration") + "\n" + extract("sessionWork") + "\n" + extract("formatExactDuration") + "\n" +
+	extract("activityDuration") + "\n" + extract("hasDelegatedTiming") + "\n" + extract("sessionWork") + "\n" + extract("formatExactDuration") + "\n" +
 	extract("catalogOf") + "\n" +
 	extract("activityOf") + "\n" + extract("filterActive") + "\n" + extract("entryMatches") + "\n" +
 	extract("subtreeMatches") + "\n" + extract("catalogTotals") + "\n" + extract("modelOf") + "\n" +
 	extract("groupModels") +
-	"\nreturn { filterActive, entryMatches, subtreeMatches, catalogTotals, modelOf, groupModels, billedInputTokens, cacheHitPercent };"
+	"\nreturn { filterActive, entryMatches, subtreeMatches, catalogTotals, modelOf, groupModels, billedInputTokens, cacheHitPercent, hasDelegatedTiming };"
 )();
 const modelsLiteral = new Function(literal("MODELS_ROUTE") + "\nreturn MODELS_ROUTE;")();
 
@@ -740,10 +740,17 @@ const filterProjections = {
 };
 const filterSummaries = {
 	// The session the tree hangs off: never a row of its own catalog, but its own
-	// usage is spent in the same place, so the totals fold it in as well.
+	// usage is spent in the same place, so the totals fold it in as well. It wears
+	// the timing shell the host really hands every session — that projection is
+	// registered for all of them, `init: () => ({ descriptorSeen: false, settledMs: 0 })`,
+	// and its wire view drops `descriptorSeen` — so a fixture that simply left the
+	// key out would be testing a shape no browser ever sees.
 	"session-tree": {
 		title: "This conversation", cwd: "D:\\dsh", running: true,
-		projectionValues: { tokenUsage: usage(200, 100, 300, 20) }
+		projectionValues: {
+			tokenUsage: usage(200, 100, 300, 20),
+			subagentTiming: { settledMs: 0 }
+		}
 	},
 	"session-alpha": {
 		title: "First child", cwd: "D:\\dsh\\one", running: true,
@@ -891,6 +898,10 @@ check("a group whose rows never billed states no share",
 
 // The session you are looking at spends its own tokens in the same conversation
 // as its children, so the totals fold it in — named beside them, never as a row.
+// It carries the host's `{ settledMs: 0 }` timing shell and no `sessionStats`, so
+// its own half of the duration is unknown: the last number below is 2 (this
+// session plus the row without any projection), where it used to be 1 only
+// because the fixture left the timing key out altogether.
 check("the session this tree hangs off is counted in the totals",
 	shape(totalsWithSelf(undefined)), "4,1,791,6000,1,2");
 check("it is named as itself, ahead of the rows",
@@ -920,37 +931,77 @@ check("the one-shot switch does not turn it into a delegation", [
 // the work done on this screen, not only the work delegated from it. A session
 // that was itself delegated keeps its delegation timing, which is the number the
 // same session shows as a row one level up: using both would count it twice.
+// The one trap on that path is the host's default: `subagentTiming` is registered
+// for *every* session with `init: () => ({ descriptorSeen: false, settledMs: 0 })`
+// and the wire view drops `descriptorSeen`, so the sessions below are handed the
+// shell `{ settledMs: 0 }` exactly like a real browser gets it.
 // The same tree, with the session it hangs off swapped for one that has its own
 // working time recorded; the rows keep their summaries, so only the session's own
 // half of the arithmetic can move the numbers below.
+const timed = (values) => ({
+	title: "The session at work", cwd: "D:\\dsh", running: false,
+	projectionValues: {
+		tokenUsage: usage(10, 5, 0, 0),
+		// The real shape on this screen, read off the live host's checkpoint:
+		// `sessionStats: { turns: 7, steps: 31, llmMs: 611594, toolMs: 19808, … }`
+		// next to the shell `subagentTiming: { descriptorSeen: false, settledMs: 0 }`.
+		...values
+	}
+});
 const selfWorkSummaries = {
 	...filterSummaries,
-	"session-clocked": {
-		title: "The session at work", cwd: "D:\\dsh", running: false,
-		projectionValues: {
-			tokenUsage: usage(10, 5, 0, 0),
-			sessionStats: { llmMs: 700000, toolMs: 50000 }
-		}
-	},
-	"session-hosted": {
-		title: "The session run as a subagent", cwd: "D:\\dsh", running: false,
-		projectionValues: {
-			tokenUsage: usage(10, 5, 0, 0),
-			sessionStats: { llmMs: 700000, toolMs: 50000 },
-			subagentTiming: { settledMs: 500 }
-		}
-	},
+	// No timing key at all (the shape this suite used to give every session).
+	"session-clocked": timed({ sessionStats: { llmMs: 700000, toolMs: 50000 } }),
+	// The shape the browser really receives: an empty timing shell beside real work.
+	"session-shelled": timed({
+		sessionStats: { turns: 7, steps: 31, llmMs: 611594, toolMs: 19808 },
+		subagentTiming: { settledMs: 0 }
+	}),
+	// The shell and nothing else: no work recorded, so nothing may be invented.
+	"session-shellOnly": timed({ subagentTiming: { settledMs: 0 } }),
+	// Real delegation timing wins over work, whether settled or still running.
+	"session-hosted": timed({
+		sessionStats: { llmMs: 700000, toolMs: 50000 },
+		subagentTiming: { settledMs: 500 }
+	}),
+	"session-running": timed({
+		sessionStats: { llmMs: 700000, toolMs: 50000 },
+		subagentTiming: { settledMs: 0, active: { since: 5000 } }
+	}),
 	"session-quiet": { title: "The session with nothing recorded", cwd: "D:\\dsh", running: false }
 };
-const totalsOfSelf = (selfId) =>
-	totalsApi.catalogTotals(treeView, undefined, filterProjections, selfWorkSummaries, filterStatuses, 6000, selfId);
+const totalsOfSelf = (selfId, overrides) =>
+	totalsApi.catalogTotals(treeView, undefined, filterProjections,
+		overrides === undefined ? selfWorkSummaries : { ...selfWorkSummaries, ...overrides },
+		// Only the session that is still working carries a live interval, and the
+		// host reports that through the statuses map rather than the summary, so a
+		// fixture that wants `activityDuration` to read `active.since` has to say
+		// "running" here exactly the way the live tree does.
+		new Map([...filterStatuses, [selfId, { running: true }]]),
+		6000, selfId);
 check("the session's own working time is counted in the duration total",
 	shape(totalsOfSelf("session-clocked")), "4,1,186,756000,1,1");
 check("the node carries the working time it folded in, not a second sum",
 	totalsOfSelf("session-clocked").self.durationMs, 750000);
+// The live shape, and the bug this file used to miss: `{ settledMs: 0 }` is not
+// "no timing key", so `??` alone would stop the fallback dead and the screen's
+// own 10 minutes of work would never reach the total.
+check("an empty timing shell still lets the session count its own work",
+	shape(totalsOfSelf("session-shelled")), "4,1,186,637402,1,1");
+check("its own share is exactly the sample's model time plus tool time",
+	[totalsOfSelf("session-shelled").self.durationMs, 611594 + 19808].join("|"), "631402|631402");
+check("only the non-row half falls back, so nothing is counted twice",
+	[shape(totalsOfSelf("session-shelled")).endsWith("637402,1,1"),
+		shape(totalsOfSelf("session-clocked")).endsWith("756000,1,1")].join("|"), "true|true");
+check("a shell with no working time recorded is unknown, never zero",
+	[shape(totalsOfSelf("session-shellOnly")),
+		totalsOfSelf("session-shellOnly").self.durationMs].join("|"), "4,1,186,6000,1,2|0");
 check("a delegated session counts its delegation timing once, never both",
 	[shape(totalsOfSelf("session-hosted")), totalsOfSelf("session-hosted").self.durationMs].join("|"),
 	"4,1,186,6500,1,1|500");
+check("a real interval beats the session's own work just as settled time does",
+	[shape(totalsOfSelf("session-running")), totalsOfSelf("session-running").self.durationMs].join("|"),
+	"4,1,186,7000,1,1|1000");
 check("a session with neither timing nor work stays unknown, never zero",
 	[shape(totalsOfSelf("session-quiet")),
 		totalsOfSelf("session-quiet").nodes.map((node) => node.id).join(",")].join("|"),
@@ -960,6 +1011,35 @@ check("a row without delegation timing is still unknown, and borrows no work",
 		totalsWithSelf(undefined, "session-beta", treeView, 6000).nodes
 			.find((node) => node.id === "session-alpha").durationMs].join("|"),
 	"3,1,171,6000,1,1|3000");
+// The row side is pinned to the byte: rows read `subagentTiming` and nothing else.
+// `session-alpha` is a row with the shell plus its own `sessionStats` (150000ms of
+// work) — it must contribute 0 of that, and must not be moved into "unknown"
+// either, exactly as before this change. `session-gamma` is where both counters
+// move, so this pair tells the two apart.
+const rowShellSummaries = {
+	"session-alpha": {
+		title: "First child", cwd: "D:\\dsh\\one", running: true,
+		projectionValues: {
+			tokenUsage: usage(100, 50, 10, 0),
+			subagentTiming: { settledMs: 0 },
+			sessionStats: { llmMs: 120000, toolMs: 30000 }
+		}
+	},
+	"session-gamma": {
+		title: "Third child", running: false,
+		projectionValues: { subagentTiming: { settledMs: 0 } }
+	}
+};
+check("a row handed only the empty timing shell still contributes zero",
+	[shape(totalsApi.catalogTotals(treeView, undefined, filterProjections, rowShellSummaries, filterStatuses, 6000, "session-tree")),
+		totalsApi.catalogTotals(treeView, undefined, filterProjections, rowShellSummaries, filterStatuses, 6000, "session-tree")
+			.nodes.find((node) => node.id === "session-alpha").durationMs].join("|"),
+	"4,1,160,0,3,2|0");
+check("a row whose timing is real is untouched by the shell rule",
+	[shape(totalsApi.catalogTotals(treeView, undefined, filterProjections, filterSummaries, filterStatuses, 6000, "session-tree")),
+		totalsApi.catalogTotals(treeView, undefined, filterProjections, filterSummaries, filterStatuses, 6000, "session-tree")
+			.nodes.find((node) => node.id === "session-alpha").durationMs].join("|"),
+	"4,1,791,6000,1,2|3000");
 check("the same filter rule decides whether the session's work counts", [
 	shape(totalsApi.catalogTotals(treeView, { text: "at work", activity: "all", oneShot: false }, filterProjections, selfWorkSummaries, filterStatuses, 6000, "session-clocked")),
 	totalsApi.catalogTotals(treeView, { text: "at work", activity: "all", oneShot: false }, filterProjections, selfWorkSummaries, filterStatuses, 6000, "session-clocked").self === null,
@@ -978,9 +1058,19 @@ check("the session is counted once, never again as a row",
 	/seen\.add\(selfId\);/.test(source), true);
 // The session's own half of the duration total is the non-row equation of the one
 // fold the rows share, and the node hands that number to the strip: no second
-// arithmetic at render time, and delegated timing still wins where it exists.
-check("the session's own working time rides the rows' own arithmetic",
-	/const durationMs = activityDuration\(summary, activity, now\)\n\t+\?\? \(asRow \? undefined : sessionWork\(summary\?\.projectionValues\?\.sessionStats\)\?\.ms\);/.test(source), true);
+// arithmetic at render time, and delegated timing still wins where it is real.
+// It cannot be decided by `??` alone, because the host hands every session a
+// `{ settledMs: 0 }` shell that is present and empty at the same time.
+check("the timing rule reads the shell as no timing at all",
+	/extract\("hasDelegatedTiming"\)/.test(readFileSync(new URL("./verify.mjs", import.meta.url), "utf8"))
+	&& /function hasDelegatedTiming\(timing\) \{\n\t+return timing !== undefined && \(timing\.active !== undefined \|\| timing\.settledMs > 0\);/.test(source), true);
+check("the fallback is decided by that rule, not by the key merely existing",
+	/const timing = summary\?\.projectionValues\?\.subagentTiming;/.test(source)
+	&& /const durationMs = asRow\n\t+\? activityDuration\(summary, activity, now\)\n\t+\t*: hasDelegatedTiming\(timing\) \? activityDuration\(summary, activity, now\)\n\t+\t*: sessionWork\(summary\?\.projectionValues\?\.sessionStats\)\?\.ms;/.test(source)
+	&& !/\?\? \(asRow \? undefined : sessionWork/.test(source), true);
+check("the row half still asks `activityDuration` and nothing else",
+	/asRow\n\t+\? activityDuration\(summary, activity, now\)\n/.test(source)
+	&& !/asRow\s*\?[^;]{0,80}sessionWork/.test(source), true);
 check("the fold hands back the working time it counted, so the strip names it",
 	/durationMs: durationMs === undefined \? 0 : Math\.max\(0, durationMs\),/.test(source)
 	&& /const selfDuration = totals\.self === null \? 0 : totals\.self\.durationMs;/.test(totalsSource), true);
